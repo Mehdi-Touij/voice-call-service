@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Async
 
 # Pipecat imports
 from pipecat.frames.frames import Frame, AudioRawFrame, TextFrame, TranscriptionFrame
