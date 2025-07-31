@@ -1,17 +1,15 @@
+# railway.yml - Force Railway to use correct start command
 services:
   voice-service:
     source: .
+    start: "python main.py"
     build:
-      buildCommand: pip install -r requirements.txt
-      startCommand: python voice-processing-service.py
+      nixPacks: true
     variables:
-      DEEPGRAM_API_KEY: ${{secrets.DEEPGRAM_API_KEY}}
-      ELEVENLABS_API_KEY: ${{secrets.ELEVENLABS_API_KEY}}
-      ELEVENLABS_VOICE_ID: ${{secrets.ELEVENLABS_VOICE_ID}}
-      N8N_WEBHOOK_URL: ${{secrets.N8N_WEBHOOK_URL}}
-      PORT: ${{PORT}}
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
     healthcheck:
-      command: ["python", "-c", "import requests; requests.get('http://localhost:8080')"]
+      command: "curl -f http://localhost:8080/health || exit 1"
       interval: 30s
       timeout: 10s
       retries: 3
