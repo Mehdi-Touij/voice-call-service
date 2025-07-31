@@ -1,14 +1,15 @@
-# Core Pipecat framework
-pipecat-ai==0.0.40
+# Core Pipecat framework with required extras
+pipecat-ai[openai,daily,deepgram,elevenlabs]==0.0.40
 
-# Audio processing
+# Core dependencies that might be needed
+openai>=1.0.0
 numpy>=1.24.0,<2.0.0
-soundfile>=0.12.1
-resampy>=0.4.2
-
-# Voice Activity Detection
 torch>=2.0.0,<3.0.0
 torchaudio>=2.0.0,<3.0.0
+
+# Audio processing
+soundfile>=0.12.1
+resampy>=0.4.2
 
 # Speech Services
 deepgram-sdk>=3.2.6
@@ -24,18 +25,12 @@ aiohttp-cors>=0.7.0
 # HTTP Client
 httpx>=0.24.1
 
-# Async utilities
-asyncio-mqtt>=0.13.0
-
 # Environment and utilities
 python-dotenv>=1.0.0
-loguru>=0.7.0
 
 # Audio format support
 webrtcvad>=2.0.10
-opuslib>=3.0.1
 
-# System dependencies (for Railway)
+# System dependencies
 setuptools>=68.0.0
 wheel>=0.40.0
-pip>=23.0.0
