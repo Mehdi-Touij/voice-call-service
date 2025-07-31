@@ -5,20 +5,18 @@ import logging
 import os
 import sys
 
-# Pipecat imports
-from pipecat.frames.frames import Frame, AudioRawFrame, TextFrame, TranscriptionFrame
+# Pipecat core imports (only what we need)
+from pipecat.frames.frames import Frame, TextFrame, TranscriptionFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.services.cartesia import CartesiaTTSService
 from pipecat.services.deepgram import DeepgramSTTService
-from pipecat.services.openai import OpenAILLMService
+from pipecat.services.elevenlabs import ElevenLabsTTSService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 from pipecat.vad.silero import SileroVADAnalyzer
 
 # Web framework for N8N integration
-from aiohttp import web, web_request
+from aiohttp import web
 import aiohttp_cors
 import json
 import httpx
@@ -41,17 +39,17 @@ class N8NProcessor:
     
     def __init__(self, webhook_url: str):
         self.webhook_url = webhook_url
-        self.session_id = f"voice_{asyncio.get_event_loop().time()}"
+        self.session_id = f"voice_{int(asyncio.get_event_loop().time())}"
         
     async def process_text(self, text: str) -> str:
         """Send text to N8N and get AI response"""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 payload = {
                     "message": text,
                     "sessionId": self.session_id,
                     "channel": "voice_call",
-                    "timestamp": str(asyncio.get_event_loop().time())
+                    "timestamp": str(int(asyncio.get_event_loop().time()))
                 }
                 
                 logger.info(f"Sending to N8N: {text}")
@@ -68,14 +66,36 @@ class N8NProcessor:
             logger.error(f"N8N processing error: {e}")
             return "I'm experiencing some technical difficulties. Please try again."
 
+class CustomLLMProcessor:
+    """Custom LLM processor that handles N8N integration"""
+    
+    def __init__(self, n8n_processor: N8NProcessor):
+        self.n8n_processor = n8n_processor
+        
+    async def process_frame(self, frame: Frame):
+        """Process frames and handle text through N8N"""
+        if isinstance(frame, TranscriptionFrame):
+            user_text = frame.text.strip()
+            if user_text:
+                logger.info(f"User said: {user_text}")
+                
+                # Get response from N8N AI Agent
+                ai_response = await self.n8n_processor.process_text(user_text)
+                
+                # Return text frame for TTS
+                yield TextFrame(ai_response)
+        else:
+            yield frame
+
 class VoiceBot:
     """Main voice bot using Pipecat framework"""
     
     def __init__(self):
         self.n8n_processor = N8NProcessor(N8N_WEBHOOK_URL)
+        self.llm_processor = CustomLLMProcessor(self.n8n_processor)
         self.current_task = None
         
-    def create_pipeline(self, transport):
+    async def create_pipeline(self, transport):
         """Create the voice processing pipeline"""
         
         # 1. Speech-to-Text (Deepgram)
@@ -92,44 +112,30 @@ class VoiceBot:
         # 2. Voice Activity Detection (Silero)
         vad = SileroVADAnalyzer()
         
-        # 3. Text-to-Speech (ElevenLabs via Cartesia for better streaming)
-        tts = CartesiaTTSService(
-            api_key=ELEVENLABS_API_KEY,  # We'll use ElevenLabs
+        # 3. Text-to-Speech (ElevenLabs)
+        tts = ElevenLabsTTSService(
+            api_key=ELEVENLABS_API_KEY,
             voice_id=ELEVENLABS_VOICE_ID,
-            model="sonic-english",  # Fast model
-            sample_rate=16000
+            model="eleven_turbo_v2"
         )
         
         # Create the pipeline
         pipeline = Pipeline([
-            transport.input(),   # Audio input from WebRTC
-            vad,                 # Voice activity detection
-            stt,                 # Speech to text
-            self.llm_processor,  # Custom LLM processor (N8N integration)
-            tts,                 # Text to speech
-            transport.output(),  # Audio output to WebRTC
+            transport.input(),           # Audio input from WebRTC
+            vad,                        # Voice activity detection
+            stt,                        # Speech to text
+            self.llm_processor,         # Custom LLM processor (N8N integration)
+            tts,                        # Text to speech
+            transport.output(),         # Audio output to WebRTC
         ])
         
         return pipeline
     
-    async def llm_processor(self, frame: Frame):
-        """Process LLM requests through N8N"""
-        if isinstance(frame, TranscriptionFrame):
-            user_text = frame.text.strip()
-            if user_text:
-                logger.info(f"User said: {user_text}")
-                
-                # Get response from N8N AI Agent
-                ai_response = await self.n8n_processor.process_text(user_text)
-                
-                # Return text frame for TTS
-                return TextFrame(ai_response)
-        
-        return frame
-    
     async def start_voice_session(self, room_url: str):
         """Start a voice session with given room URL"""
         try:
+            logger.info(f"Starting voice session for room: {room_url}")
+            
             # Configure transport (Daily.co for WebRTC)
             transport = DailyTransport(
                 room_url,
@@ -145,7 +151,7 @@ class VoiceBot:
             )
             
             # Create and run pipeline
-            pipeline = self.create_pipeline(transport)
+            pipeline = await self.create_pipeline(transport)
             task = PipelineTask(pipeline, PipelineParams())
             
             # Store current task for cleanup
@@ -166,8 +172,10 @@ voice_bot = VoiceBot()
 async def create_room(request):
     """Create a new Daily.co room for voice chat"""
     try:
+        logger.info("Creating new Daily.co room...")
+        
         # Create temporary room using Daily API
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 "https://api.daily.co/v1/rooms",
                 headers={
@@ -189,6 +197,8 @@ async def create_room(request):
                 room_data = response.json()
                 room_url = room_data["url"]
                 
+                logger.info(f"Room created successfully: {room_url}")
+                
                 # Start voice session in background
                 asyncio.create_task(voice_bot.start_voice_session(room_url))
                 
@@ -198,7 +208,7 @@ async def create_room(request):
                     "session_id": voice_bot.n8n_processor.session_id
                 })
             else:
-                logger.error(f"Failed to create room: {response.status_code}")
+                logger.error(f"Failed to create room: {response.status_code} - {await response.text()}")
                 return web.json_response(
                     {"error": "Failed to create room"}, 
                     status=500
@@ -216,7 +226,7 @@ async def health_check(request):
     return web.json_response({
         "status": "healthy",
         "service": "pipecat-voice-ai",
-        "timestamp": str(asyncio.get_event_loop().time()),
+        "timestamp": str(int(asyncio.get_event_loop().time())),
         "environment": {
             "deepgram": "configured" if DEEPGRAM_API_KEY else "missing",
             "elevenlabs": "configured" if ELEVENLABS_API_KEY else "missing", 
@@ -236,12 +246,13 @@ async def voice_widget(request):
     <title>Pipecat Voice AI</title>
     <script src="https://unpkg.com/@daily-co/daily-js"></script>
     <style>
+        body { margin: 0; padding: 50px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        .info { text-align: center; margin-bottom: 50px; }
         .voice-widget {
             position: fixed;
             bottom: 30px;
             right: 30px;
             z-index: 10000;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         }
         .voice-button {
             width: 70px;
@@ -289,6 +300,12 @@ async def voice_widget(request):
     </style>
 </head>
 <body>
+    <div class="info">
+        <h1>🎙️ Pipecat Voice AI Test</h1>
+        <p>Click the voice button in the bottom-right corner to start talking!</p>
+        <p><strong>Status:</strong> <span id="serviceStatus">Checking...</span></p>
+    </div>
+
     <div class="voice-widget">
         <button class="voice-button" id="voiceButton">🎤</button>
         <div class="status-display" id="statusDisplay">Click to start voice chat</div>
@@ -301,8 +318,32 @@ async def voice_widget(request):
                 this.isActive = false;
                 this.button = document.getElementById('voiceButton');
                 this.status = document.getElementById('statusDisplay');
+                this.serviceStatus = document.getElementById('serviceStatus');
                 
                 this.button.addEventListener('click', () => this.toggleVoice());
+                this.checkServiceHealth();
+            }
+            
+            async checkServiceHealth() {
+                try {
+                    const response = await fetch('/health');
+                    const health = await response.json();
+                    
+                    const missing = Object.entries(health.environment)
+                        .filter(([key, value]) => value === 'missing')
+                        .map(([key]) => key);
+                    
+                    if (missing.length === 0) {
+                        this.serviceStatus.textContent = '✅ All services configured';
+                        this.serviceStatus.style.color = 'green';
+                    } else {
+                        this.serviceStatus.textContent = `❌ Missing: ${missing.join(', ')}`;
+                        this.serviceStatus.style.color = 'red';
+                    }
+                } catch (error) {
+                    this.serviceStatus.textContent = '❌ Service unavailable';
+                    this.serviceStatus.style.color = 'red';
+                }
             }
             
             async toggleVoice() {
@@ -316,6 +357,7 @@ async def voice_widget(request):
             async startVoiceChat() {
                 try {
                     this.updateStatus('Connecting...');
+                    console.log('Starting voice chat...');
                     
                     // Create Daily.co room
                     const response = await fetch('/create-room', {
@@ -326,6 +368,8 @@ async def voice_widget(request):
                     if (!response.ok) {
                         throw new Error(data.error || 'Failed to create room');
                     }
+                    
+                    console.log('Room created:', data.room_url);
                     
                     // Join the room
                     this.callFrame = DailyIframe.createFrame({
@@ -347,11 +391,14 @@ async def voice_widget(request):
                     });
                     
                     // Set up event listeners
-                    this.callFrame.on('participant-joined', () => {
-                        this.updateStatus('🎙️ Voice AI ready - speak naturally');
-                        this.button.classList.add('active');
-                        this.button.textContent = '🔴';
-                        this.isActive = true;
+                    this.callFrame.on('participant-joined', (event) => {
+                        console.log('Participant joined:', event.participant.user_name);
+                        if (event.participant.user_name === 'Voice Assistant') {
+                            this.updateStatus('🎙️ Voice AI ready - speak naturally');
+                            this.button.classList.add('active');
+                            this.button.textContent = '🔴';
+                            this.isActive = true;
+                        }
                     });
                     
                     this.callFrame.on('participant-left', () => {
@@ -389,7 +436,7 @@ async def voice_widget(request):
                 
                 setTimeout(() => {
                     this.status.classList.remove('visible');
-                }, 3000);
+                }, 4000);
             }
         }
         
@@ -430,6 +477,8 @@ async def init_app():
 
 async def main():
     """Main application entry point"""
+    logger.info("Starting Pipecat Voice AI Service...")
+    
     # Validate environment variables
     missing_vars = []
     if not DEEPGRAM_API_KEY:
@@ -441,6 +490,7 @@ async def main():
     
     if missing_vars:
         logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+        logger.error("Please set these variables in Railway dashboard")
         sys.exit(1)
     
     # Start web server
