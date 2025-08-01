@@ -47,7 +47,8 @@ class N8NLLMProcessor(FrameProcessor):
     def __init__(self, webhook_url: str):
         super().__init__()
         self.webhook_url = webhook_url
-        self.session_id = f"voice_{int(asyncio.get_event_loop().time())}"
+        import time
+        self.session_id = f"voice_{int(time.time())}"
         logger.info(f"N8N Processor initialized with session: {self.session_id}")
     
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> AsyncGenerator[Frame, None]:
@@ -237,7 +238,7 @@ async def create_room(request):
                     "enable_chat": False,
                     "enable_screenshare": False,
                     "enable_recording": False,
-                    "exp": int(asyncio.get_event_loop().time()) + 3600,  # 1 hour
+                    "exp": int(time.time()) + 3600,
                     "audio_only": True
                 }
             }
