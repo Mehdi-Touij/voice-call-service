@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pipecat Voice AI + N8N</title>
+    <!-- FIXED: Using correct Daily.co CDN URL -->
+    <script crossorigin src="https://unpkg.com/@daily-co/daily-js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+        .header h1 {
+            font-size: 3rem;
+            margin-bottom: 10px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+        .framework-badge {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+            display: inline-block;
+            margin: 10px 0;
+            backdrop-filter: blur(10px);
+        }
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        .status-card {
+            background: rgba(255,255,255,0.95);
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            text-align: center;
+            backdrop-filter: blur(10px);
+            transition: transform 0.3s ease;
+        }
+        .status-card:hover {
+            transform: translateY(-5px);
+        }
+        .status-card h3 {
+            margin: 0 0 15px 0;
+            color: #2c3e50;
+            font-size: 1.1rem;
+        }
+        .status-indicator {
+            font-size: 2rem;
+            margin-bottom: 15px;
+        }
+        .status-text {
+            font-size: 14px;
+            color: #666;
+        }
+        .voice-widget {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            z-index: 10000;
+        }
+        .voice-button {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 12px 40px rgba(102, 126, 234, 0.4);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            color: white;
+            font-size: 32px;
+            position: relative;
+        }
+        .voice-button:hover {
+            transform: scale(1.05) translateY(-2px);
+            box-shadow: 0 16px 50px rgba(102, 126, 234, 0.5);
+        }
+        .voice-button.connecting {
+            background: linear-gradient(135deg, #ffa726 0%, #ff9800 100%);
+            animation: connecting 1s ease-in-out infinite;
+        }
+        .voice-button.active {
+            background: linear-gradient(135deg, #4caf50 0%, #45a049 100%);
+            animation: listening 2s ease-in-out infinite;
+        }
+        @keyframes connecting {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        @keyframes listening {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.02); }
+        }
+        .status-display {
+            position: absolute;
+            bottom: 95px;
+            right: 0;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 15px 20px;
+            border-radius: 15px;
+            font-size: 14px;
+            opacity: 0;
+            transition: all 0.3s ease;
+            min-width: 280px;
+            text-align: center;
+            font-weight: 500;
+            backdrop-filter: blur(10px);
+        }
+        .status-display.visible {
+            opacity: 1;
+        }
+        .status-display.error {
+            background: rgba(244, 67, 54, 0.9);
+        }
+        .call-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 9999;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
+        .call-container {
+            width: 90%;
+            max-width: 600px;
+            height: 70%;
+            max-height: 400px;
+            background: #1a1a1a;
+            border-radius: 20px;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+        .call-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .call-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+        .close-button {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 5px 10px;
+            border-radius: 5px;
+            transition: background 0.2s ease;
+        }
+        .close-button:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        .call-frame {
+            width: 100%;
+            height: calc(100% - 60px);
+        }
+        .logs {
+            background: rgba(255,255,255,0.95);
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            backdrop-filter: blur(10px);
+        }
+        .logs h3 {
+            color: #2c3e50;
+            margin-bottom: 15px;
+        }
+        .log-container {
+            max-height: 300px;
+            overflow-y: auto;
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+        .log-entry {
+            margin: 5px 0;
+        }
+        .log-entry.info { color: #2196f3; }
+        .log-entry.success { color: #4caf50; }
+        .log-entry.error { color: #f44336; }
+        .error-display {
+            display: none;
+            background: rgba(244, 67, 54, 0.9);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            text-align: center;
+        }
+        .error-display.visible {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎙️ Pipecat Voice AI</h1>
+            <div class="framework-badge">Powered by Pipecat + N8N + Claude</div>
+            <p>Professional real-time voice conversation with AI memory & knowledge base</p>
+        </div>
+
+        <div class="error-display" id="errorDisplay"></div>
+
+        <div class="status-grid">
+            <div class="status-card">
+                <div class="status-indicator" id="deepgramStatus">⏳</div>
+                <h3>Deepgram STT</h3>
+                <div class="status-text" id="deepgramText">Checking...</div>
+            </div>
+            <div class="status-card">
+                <div class="status-indicator" id="elevenlabsStatus">⏳</div>
+                <h3>ElevenLabs TTS</h3>
+                <div class="status-text" id="elevenlabsText">Checking...</div>
+            </div>
+            <div class="status-card">
+                <div class="status-indicator" id="n8nStatus">⏳</div>
+                <h3>N8N AI Agent</h3>
+                <div class="status-text" id="n8nText">Checking...</div>
+            </div>
+            <div class="status-card">
+                <div class="status-indicator" id="dailyStatus">⏳</div>
+                <h3>Daily.co WebRTC</h3>
+                <div class="status-text" id="dailyText">Checking...</div>
+            </div>
+        </div>
+
+        <div class="logs">
+            <h3>🔍 Pipecat Session Logs</h3>
+            <div class="log-container" id="logContainer"></div>
+        </div>
+    </div>
+
+    <div class="voice-widget">
+        <button class="voice-button" id="voiceButton">🎤</button>
+        <div class="status-display" id="statusDisplay">Ready for voice chat</div>
+    </div>
+
+    <div class="call-overlay" id="callOverlay">
+        <div class="call-container">
+            <div class="call-header">
+                <div class="call-title">🎙️ Pipecat + N8N Voice Session</div>
+                <button class="close-button" id="closeButton">×</button>
+            </div>
+            <div class="call-frame" id="callFrame"></div>
+        </div>
+    </div>
+
+    <script>
+        class PipecatN8NWidget {
+            constructor() {
+                this.callFrame = null;
+                this.isActive = false;
+                this.button = document.getElementById('voiceButton');
+                this.status = document.getElementById('statusDisplay');
+                this.overlay = document.getElementById('callOverlay');
+                this.callContainer = document.getElementById('callFrame');
+                this.closeButton = document.getElementById('closeButton');
+                this.logContainer = document.getElementById('logContainer');
+                this.errorDisplay = document.getElementById('errorDisplay');
+                
+                // Verify all elements exist
+                if (!this.callContainer) {
+                    console.error('Call container element not found!');
+                    this.showError('UI initialization failed: Call container not found');
+                    return;
+                }
+                
+                this.button.addEventListener('click', () => this.toggleVoice());
+                this.closeButton.addEventListener('click', () => this.endCall());
+                
+                // Check service health after initialization
+                this.checkServiceHealth();
+            }
+            
+            showError(message) {
+                console.error('[Pipecat Error]', message);
+                if (this.errorDisplay) {
+                    this.errorDisplay.textContent = message;
+                    this.errorDisplay.classList.add('visible');
+                    setTimeout(() => {
+                        this.errorDisplay.classList.remove('visible');
+                    }, 5000);
+                }
+            }
+            
+            log(message, type = 'info') {
+                const timestamp = new Date().toLocaleTimeString();
+                const logEntry = document.createElement('div');
+                logEntry.className = 'log-entry ' + type;
+                logEntry.textContent = '[' + timestamp + '] ' + message;
+                this.logContainer.appendChild(logEntry);
+                this.logContainer.scrollTop = this.logContainer.scrollHeight;
+                console.log('[Pipecat+N8N] ' + message);
+            }
+            
+            updateServiceStatus(service, status, text = '') {
+                const indicator = document.getElementById(service + 'Status');
+                const textEl = document.getElementById(service + 'Text');
+                
+                if (indicator && textEl) {
+                    if (status === 'configured' || status.includes('domain:')) {
+                        indicator.textContent = '✅';
+                        textEl.textContent = text || 'Connected';
+                        textEl.style.color = '#4caf50';
+                    } else {
+                        indicator.textContent = '❌';
+                        textEl.textContent = text || 'Missing Config';
+                        textEl.style.color = '#f44336';
+                    }
+                }
+            }
+            
+            async checkServiceHealth() {
+                try {
+                    this.log('Checking Pipecat + N8N service health...', 'info');
+                    const response = await fetch('/health');
+                    
+                    if (!response.ok) {
+                        throw new Error('Health check failed: ' + response.status);
+                    }
+                    
+                    const health = await response.json();
+                    
+                    this.log('Service: ' + health.service + ' (' + health.framework + ')', 'success');
+                    this.log('N8N Integration: ' + health.n8n_integration.workflow, 'info');
+                    
+                    // Update status indicators
+                    Object.entries(health.environment).forEach(([service, status]) => {
+                        if (service === 'daily' && status.includes('domain:')) {
+                            this.updateServiceStatus(service, status, 'Domain Ready');
+                        } else {
+                            this.updateServiceStatus(service, status);
+                        }
+                    });
+                    
+                    const missing = Object.entries(health.environment)
+                        .filter(([key, value]) => value === 'missing')
+                        .map(([key]) => key);
+                    
+                    if (missing.length === 0) {
+                        this.log('✅ All services configured - ready for voice chat!', 'success');
+                    } else {
+                        this.log('❌ Missing: ' + missing.join(', '), 'error');
+                        this.showError('Missing services: ' + missing.join(', '));
+                    }
+                } catch (error) {
+                    this.log('❌ Health check failed: ' + error.message, 'error');
+                    this.showError('Service health check failed. Please refresh the page.');
+                }
+            }
+            
+            async toggleVoice() {
+                if (!this.isActive) {
+                    await this.startVoiceChat();
+                } else {
+                    await this.endCall();
+                }
+            }
+            
+            async startVoiceChat() {
+                try {
+                    // CRITICAL: Check if a frame already exists
+                    if (this.callFrame) {
+                        console.log('Existing call frame found, cleaning up first...');
+                        try {
+                            await this.callFrame.destroy();
+                        } catch (e) {
+                            console.error('Error destroying existing frame:', e);
+                        }
+                        this.callFrame = null;
+                    }
+                    
+                    // Also check for any Daily frames in the container
+                    if (this.callContainer && this.callContainer.querySelector('iframe')) {
+                        console.log('Found existing iframe in container, removing...');
+                        this.callContainer.innerHTML = '';
+                    }
+                    
+                    this.button.classList.add('connecting');
+                    this.updateStatus('Starting Pipecat session...', false);
+                    this.log('🚀 Starting Pipecat + N8N voice session...', 'info');
+                    
+                    // Create Daily.co room
+                    const response = await fetch('/create-room', { method: 'POST' });
+                    const data = await response.json();
+                    
+                    if (!response.ok) {
+                        throw new Error(data.error || 'Failed to create room');
+                    }
+                    
+                    this.log('Room created: ' + data.room_url, 'success');
+                    this.log('Session ID: ' + data.session_id, 'info');
+                    
+                    // FIXED: Check for DailyIframe instead of Daily
+                    if (typeof window.DailyIframe === 'undefined') {
+                        throw new Error('Daily.co library not loaded. Please refresh the page.');
+                    }
+                    
+                    // Show call overlay first
+                    this.overlay.style.display = 'flex';
+                    
+                    // Small delay to ensure DOM is ready
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    
+                    // Ensure container exists and is visible
+                    if (!this.callContainer) {
+                        throw new Error('Call container element not found');
+                    }
+                    
+                    // Create the frame in a try-catch to handle any Daily.co errors
+                    let frameCreated = false;
+                    try {
+                        console.log('Creating Daily frame with DailyIframe...');
+                        // FIXED: Use window.DailyIframe
+                        this.callFrame = window.DailyIframe.createFrame(this.callContainer, {
+                            iframeStyle: {
+                                width: '100%',
+                                height: '100%',
+                                border: '0'
+                            },
+                            showLeaveButton: true,
+                            showFullscreenButton: false
+                        });
+                        frameCreated = true;
+                        console.log('Daily frame created successfully');
+                    } catch (frameError) {
+                        console.error('Failed to create Daily frame:', frameError);
+                        throw new Error('Failed to create video frame: ' + (frameError?.message || frameError?.toString() || 'Unknown error'));
+                    }
+                    
+                    // Only proceed if frame was created
+                    if (!frameCreated || !this.callFrame) {
+                        throw new Error('Daily frame was not created properly');
+                    }
+                    
+                    // Set up event listeners BEFORE joining
+                    this.setupCallEventListeners();
+                    
+                    // Join the room
+                    try {
+                        console.log('Joining room:', data.room_url);
+                        await this.callFrame.join({
+                            url: data.room_url,
+                            userName: 'User'
+                        });
+                        console.log('Successfully joined room');
+                    } catch (joinError) {
+                        console.error('Failed to join room:', joinError);
+                        // Clean up the frame since join failed
+                        if (this.callFrame) {
+                            try {
+                                await this.callFrame.destroy();
+                            } catch (e) {
+                                console.error('Error destroying frame after join failure:', e);
+                            }
+                            this.callFrame = null;
+                        }
+                        throw new Error('Failed to join room: ' + (joinError?.message || joinError?.toString() || 'Unknown join error'));
+                    }
+                    
+                } catch (error) {
+                    // Comprehensive error handling
+                    const errorMessage = error?.message || error?.toString() || 'Unknown error occurred';
+                    console.error('Voice chat error:', error);
+                    this.log('Failed: ' + errorMessage, 'error');
+                    this.updateStatus('Failed: ' + errorMessage, true);
+                    this.showError(errorMessage);
+                    
+                    // Reset UI
+                    this.button.classList.remove('connecting', 'active');
+                    this.button.textContent = '🎤';
+                    this.overlay.style.display = 'none';
+                    this.isActive = false;
+                    
+                    // Ensure frame is cleaned up
+                    if (this.callFrame) {
+                        console.log('Cleaning up call frame after error...');
+                        try {
+                            await this.callFrame.destroy();
+                        } catch (e) {
+                            console.error('Error destroying frame:', e);
+                        }
+                        this.callFrame = null;
+                    }
+                    
+                    // Also clean the container as a last resort
+                    if (this.callContainer && this.callContainer.querySelector('iframe')) {
+                        this.callContainer.innerHTML = '';
+                    }
+                }
+            }
+            
+            setupCallEventListeners() {
+                this.callFrame.on('joined-meeting', () => {
+                    this.log('✅ Joined Daily.co meeting', 'success');
+                    this.button.classList.remove('connecting');
+                    this.button.classList.add('active');
+                    this.button.textContent = '🔴';
+                    this.updateStatus('🎙️ Pipecat AI ready! Speak naturally.');
+                    this.isActive = true;
+                });
+                
+                this.callFrame.on('participant-joined', (event) => {
+                    this.log('Participant joined: ' + event.participant.user_name, 'info');
+                    if (event.participant.user_name === 'Voice Assistant') {
+                        this.log('🤖 Pipecat AI connected with N8N!', 'success');
+                        this.updateStatus('🤖 AI + N8N ready!');
+                    }
+                });
+                
+                this.callFrame.on('track-started', (event) => {
+                    if (event.track.kind === 'audio' && event.participant.user_name === 'Voice Assistant') {
+                        this.log('🔊 AI is speaking...', 'info');
+                        this.updateStatus('🔊 AI responding...');
+                    }
+                });
+                
+                this.callFrame.on('track-stopped', (event) => {
+                    if (event.track.kind === 'audio' && event.participant.user_name === 'Voice Assistant') {
+                        this.log('🎙️ Ready for next input', 'info');
+                        this.updateStatus('🎙️ Listening...');
+                    }
+                });
+                
+                this.callFrame.on('error', (error) => {
+                    this.log('Call error: ' + (error.errorMsg || error), 'error');
+                    this.updateStatus('Connection error', true);
+                    this.endCall();
+                });
+                
+                this.callFrame.on('left-meeting', () => {
+                    this.log('Left meeting', 'info');
+                    this.endCall();
+                });
+            }
+            
+            async endCall() {
+                try {
+                    this.log('🔚 Ending Pipecat session...', 'info');
+                    
+                    if (this.callFrame) {
+                        try {
+                            // Check if we're in a meeting before trying to leave
+                            const meetingState = this.callFrame.meetingState();
+                            console.log('Meeting state:', meetingState);
+                            
+                            if (meetingState === 'joined' || meetingState === 'joining') {
+                                await this.callFrame.leave();
+                            }
+                            
+                            await this.callFrame.destroy();
+                        } catch (e) {
+                            console.error('Error during cleanup:', e);
+                        }
+                        this.callFrame = null;
+                    }
+                    
+                    this.overlay.style.display = 'none';
+                    this.isActive = false;
+                    this.button.classList.remove('connecting', 'active');
+                    this.button.textContent = '🎤';
+                    this.updateStatus('Session ended');
+                    this.log('Session ended successfully', 'success');
+                    
+                } catch (error) {
+                    this.log('Error ending session: ' + error.message, 'error');
+                    // Force cleanup even on error
+                    this.callFrame = null;
+                    this.overlay.style.display = 'none';
+                    this.isActive = false;
+                    this.button.classList.remove('connecting', 'active');
+                    this.button.textContent = '🎤';
+                }
+            }
+            
+            updateStatus(message, isError = false) {
+                this.status.textContent = message;
+                this.status.classList.toggle('error', isError);
+                this.status.classList.add('visible');
+                
+                if (!this.isActive) {
+                    setTimeout(() => {
+                        this.status.classList.remove('visible');
+                    }, 4000);
+                }
+            }
+        }
+        
+        // FIXED: Initialize widget when DailyIframe is loaded
+        window.addEventListener('load', () => {
+            console.log('Window loaded, checking for Daily.co...');
+            
+            const initWidget = () => {
+                // FIXED: Check for DailyIframe (the correct object)
+                if (typeof window.DailyIframe !== 'undefined') {
+                    console.log('Daily.co (DailyIframe) loaded successfully');
+                    try {
+                        const widget = new PipecatN8NWidget();
+                        window.pipecatWidget = widget;
+                        console.log('🎙️ Pipecat + N8N Voice Widget ready!');
+                    } catch (error) {
+                        console.error('Failed to initialize widget:', error);
+                        document.getElementById('errorDisplay').textContent = 'Failed to initialize voice widget';
+                        document.getElementById('errorDisplay').classList.add('visible');
+                    }
+                } else {
+                    console.log('Daily.co (DailyIframe) not yet loaded, waiting...');
+                    setTimeout(initWidget, 500);
+                }
+            };
+            
+            initWidget();
+        });
+    </script>
+</body>
+</html>
