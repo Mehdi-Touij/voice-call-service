@@ -238,7 +238,7 @@ async def create_room(request):
                     "enable_chat": False,
                     "enable_screenshare": False,
                     "enable_recording": False,
-                    "exp": int(time.time()) + 3600,
+                    "exp": int(time.time()) + 3600,  # 1 hour
                     "audio_only": True
                 }
             }
@@ -296,7 +296,7 @@ async def health_check(request):
         "service": "pipecat-voice-ai-n8n",
         "framework": "pipecat",
         "version": "0.0.40",
-        "timestamp": int(asyncio.get_event_loop().time()),
+        "timestamp": int(time.time()),
         "environment": environment_status,
         "features": {
             "vad": "silero",
@@ -613,14 +613,16 @@ async def voice_widget(request):
                 const indicator = document.getElementById(`${service}Status`);
                 const textEl = document.getElementById(`${service}Text`);
                 
-                if (status === 'configured') {
-                    indicator.textContent = '✅';
-                    textEl.textContent = 'Connected';
-                    textEl.style.color = '#4caf50';
-                } else {
-                    indicator.textContent = '❌';
-                    textEl.textContent = text || 'Missing Config';
-                    textEl.style.color = '#f44336';
+                if (indicator && textEl) {
+                    if (status === 'configured') {
+                        indicator.textContent = '✅';
+                        textEl.textContent = 'Connected';
+                        textEl.style.color = '#4caf50';
+                    } else {
+                        indicator.textContent = '❌';
+                        textEl.textContent = text || 'Missing Config';
+                        textEl.style.color = '#f44336';
+                    }
                 }
             }
             
