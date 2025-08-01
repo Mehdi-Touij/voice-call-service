@@ -1,0 +1,40 @@
+# Pipecat Cloud Configuration
+
+[bot]
+# Your bot's entry point
+entrypoint = "bot:bot"
+
+# Bot configuration
+name = "N8N Voice Assistant"
+description = "AI voice assistant powered by N8N workflow"
+
+# Voice configuration
+[bot.voice]
+provider = "elevenlabs"
+voice_id = "aD6riP1btT197c6dACmy"
+model = "eleven_turbo_v2"
+
+# Speech recognition
+[bot.speech]
+provider = "deepgram"
+model = "nova-2"
+language = "en-US"
+
+# Conversation settings
+[bot.conversation]
+# Allow interruptions (user can speak while bot is talking)
+allow_interruptions = true
+
+# End conversation after X seconds of silence
+end_after_silence_seconds = 30
+
+# Initial greeting (optional)
+initial_message = "Hi! I'm your AI assistant. How can I help you today?"
+
+# Performance settings
+[bot.performance]
+# Maximum conversation duration (minutes)
+max_duration_minutes = 10
+
+# Target latency (milliseconds)
+target_latency_ms = 200
