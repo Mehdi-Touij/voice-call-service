@@ -1,0 +1,11 @@
+--- main.py.old
++++ main.py
+@@ -287,7 +287,7 @@
+                 })
+                 return web.Response(text=response_data, content_type='application/json')
+             else:
+-                error_text = await response.text()
++                error_text = response.text
+                 logger.error(f"❌ Failed to create room: {response.status_code} - {error_text}")
+                 response_data = json.dumps({"error": f"Room creation failed: {response.status_code}"})
+                 return web.Response(text=response_data, status=500, content_type='application/json')
