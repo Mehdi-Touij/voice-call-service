@@ -1,31 +1,29 @@
-# Bulletproof Pipecat requirements - with OpenAI dependency
-pipecat-ai==0.0.40
+# Core Pipecat with required extras
+pipecat-ai[daily,deepgram,elevenlabs,silero,openai]==0.0.40
 
-# Required by Pipecat internally (even if we don't use OpenAI directly)
-openai>=1.0.0
-
-# Install Pipecat extras separately to avoid conflicts
-daily-python>=0.9.0
-deepgram-sdk>=3.2.6
-elevenlabs>=0.2.26
-
-# VAD dependencies - critical for voice detection
-silero-vad>=4.0.0
-torch>=2.0.0,<3.0.0
-torchaudio>=2.0.0,<3.0.0
-
-# Core dependencies
-numpy>=1.24.0,<2.0.0
-soundfile>=0.12.1
-
-# Web framework
-aiohttp>=3.8.5
-aiohttp-cors>=0.7.0
-httpx>=0.24.1
+# Explicit core dependencies to avoid conflicts
+aiohttp==3.9.1
+aiohttp-cors==0.7.0
+httpx==0.25.2
 
 # Audio processing
-webrtcvad>=2.0.10
+numpy==1.24.4
+soundfile==0.12.1
+webrtcvad==2.0.10
 
-# System dependencies for Railway
-setuptools>=68.0.0
-wheel>=0.40.0
+# Torch for Silero VAD (specific versions for compatibility)
+torch==2.1.2
+torchaudio==2.1.2
+
+# Required by Daily.co
+daily-python==0.9.0
+
+# Async support
+asyncio-throttle==1.0.2
+
+# JSON handling
+orjson==3.9.10
+
+# System dependencies
+setuptools==69.0.2
+wheel==0.42.0
