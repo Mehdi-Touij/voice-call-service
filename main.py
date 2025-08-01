@@ -4,101 +4,144 @@ import asyncio
 import logging
 import os
 import sys
+from typing import AsyncGenerator
 
-# Pipecat core imports (only what we need)
+# Pipecat core imports
 from pipecat.frames.frames import Frame, TextFrame, TranscriptionFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.deepgram import DeepgramSTTService
 from pipecat.services.elevenlabs import ElevenLabsTTSService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 from pipecat.vad.silero import SileroVADAnalyzer
 
-# Web framework for N8N integration
+# Web framework
 from aiohttp import web
 import aiohttp_cors
 import json
 import httpx
 
 # Configure logging
-logging.basicConfig(format="%(levelname)s %(name)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 # Environment variables
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY") 
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "aD6riP1btT197c6dACmy")
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL")
 DAILY_API_KEY = os.getenv("DAILY_API_KEY", "")
 PORT = int(os.getenv("PORT", 8080))
 
-class N8NProcessor:
-    """Custom processor to integrate with your N8N AI Agent"""
+class N8NLLMProcessor(FrameProcessor):
+    """
+    Pipecat processor that integrates with your N8N AI Agent workflow
+    Handles the exact payload format your N8N webhook expects
+    """
     
     def __init__(self, webhook_url: str):
+        super().__init__()
         self.webhook_url = webhook_url
         self.session_id = f"voice_{int(asyncio.get_event_loop().time())}"
+        logger.info(f"N8N Processor initialized with session: {self.session_id}")
+    
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> AsyncGenerator[Frame, None]:
+        """Process frames through the Pipecat pipeline"""
         
-    async def process_text(self, text: str) -> str:
-        """Send text to N8N and get AI response"""
+        if isinstance(frame, TranscriptionFrame):
+            # Extract user speech
+            user_text = frame.text.strip()
+            
+            if user_text and len(user_text) > 2:  # Ignore very short transcriptions
+                logger.info(f"🎤 User said: '{user_text}'")
+                
+                try:
+                    # Send to your N8N AI Agent
+                    ai_response = await self.call_n8n_agent(user_text)
+                    logger.info(f"🤖 AI responded: '{ai_response}'")
+                    
+                    # Send AI response for TTS
+                    yield TextFrame(ai_response)
+                    
+                except Exception as e:
+                    logger.error(f"❌ N8N processing failed: {e}")
+                    error_response = "I'm having some technical difficulties. Please try again."
+                    yield TextFrame(error_response)
+            else:
+                logger.debug(f"Ignoring short transcription: '{user_text}'")
+        else:
+            # Pass through other frame types
+            yield frame
+    
+    async def call_n8n_agent(self, text: str) -> str:
+        """
+        Call your N8N AI Agent with the exact payload format it expects
+        Based on your workflow: message, sessionId, channel
+        """
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                payload = {
-                    "message": text,
-                    "sessionId": self.session_id,
-                    "channel": "voice_call",
-                    "timestamp": str(int(asyncio.get_event_loop().time()))
-                }
+            # Payload format matching your N8N "Edit Fields" node
+            payload = {
+                "message": text,
+                "sessionId": self.session_id, 
+                "channel": "voice_call"
+            }
+            
+            logger.info(f"📤 Sending to N8N: {payload}")
+            
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                response = await client.post(
+                    self.webhook_url,
+                    json=payload,
+                    headers={"Content-Type": "application/json"}
+                )
                 
-                logger.info(f"Sending to N8N: {text}")
-                response = await client.post(self.webhook_url, json=payload)
                 response.raise_for_status()
-                
                 result = response.json()
-                ai_response = result.get("output", result.get("response", result.get("message", "I'm sorry, I didn't understand that.")))
                 
-                logger.info(f"N8N response: {ai_response}")
+                logger.info(f"📥 N8N response: {result}")
+                
+                # Extract AI response from your N8N workflow
+                # Your "Respond to Webhook" node should return the AI Agent output
+                ai_response = result.get("output", result.get("text", result.get("message", "I didn't understand that.")))
+                
                 return ai_response
                 
+        except httpx.TimeoutException:
+            logger.error("⏰ N8N request timed out")
+            raise Exception("AI processing timed out")
+        except httpx.HTTPStatusError as e:
+            logger.error(f"🔥 N8N HTTP error: {e.response.status_code}")
+            raise Exception("AI service temporarily unavailable") 
         except Exception as e:
-            logger.error(f"N8N processing error: {e}")
-            return "I'm experiencing some technical difficulties. Please try again."
-
-class CustomLLMProcessor:
-    """Custom LLM processor that handles N8N integration"""
-    
-    def __init__(self, n8n_processor: N8NProcessor):
-        self.n8n_processor = n8n_processor
-        
-    async def process_frame(self, frame: Frame):
-        """Process frames and handle text through N8N"""
-        if isinstance(frame, TranscriptionFrame):
-            user_text = frame.text.strip()
-            if user_text:
-                logger.info(f"User said: {user_text}")
-                
-                # Get response from N8N AI Agent
-                ai_response = await self.n8n_processor.process_text(user_text)
-                
-                # Return text frame for TTS
-                yield TextFrame(ai_response)
-        else:
-            yield frame
+            logger.error(f"💥 Unexpected N8N error: {e}")
+            raise
 
 class VoiceBot:
-    """Main voice bot using Pipecat framework"""
+    """Complete Pipecat voice bot with N8N integration"""
     
     def __init__(self):
-        self.n8n_processor = N8NProcessor(N8N_WEBHOOK_URL)
-        self.llm_processor = CustomLLMProcessor(self.n8n_processor)
+        self.n8n_processor = N8NLLMProcessor(N8N_WEBHOOK_URL)
         self.current_task = None
+        self.is_running = False
         
     async def create_pipeline(self, transport):
-        """Create the voice processing pipeline"""
+        """Create the complete Pipecat voice processing pipeline"""
         
-        # 1. Speech-to-Text (Deepgram)
+        logger.info("🔧 Building Pipecat pipeline...")
+        
+        # 1. Voice Activity Detection - Silero VAD
+        vad = SileroVADAnalyzer(
+            confidence_threshold=0.6,
+            min_volume=0.6
+        )
+        logger.info("✅ VAD (Silero) configured")
+        
+        # 2. Speech-to-Text - Deepgram Nova-2
         stt = DeepgramSTTService(
             api_key=DEEPGRAM_API_KEY,
             model="nova-2",
@@ -108,38 +151,44 @@ class VoiceBot:
             utterance_end_ms=1000,
             vad_events=True
         )
+        logger.info("✅ STT (Deepgram Nova-2) configured")
         
-        # 2. Voice Activity Detection (Silero)
-        vad = SileroVADAnalyzer()
-        
-        # 3. Text-to-Speech (ElevenLabs)
+        # 3. Text-to-Speech - ElevenLabs Turbo v2
         tts = ElevenLabsTTSService(
             api_key=ELEVENLABS_API_KEY,
             voice_id=ELEVENLABS_VOICE_ID,
-            model="eleven_turbo_v2"
+            model="eleven_turbo_v2",
+            optimize_streaming_latency=3
         )
+        logger.info("✅ TTS (ElevenLabs Turbo v2) configured")
         
-        # Create the pipeline
+        # 4. Build the pipeline
         pipeline = Pipeline([
-            transport.input(),           # Audio input from WebRTC
-            vad,                        # Voice activity detection
-            stt,                        # Speech to text
-            self.llm_processor,         # Custom LLM processor (N8N integration)
-            tts,                        # Text to speech
-            transport.output(),         # Audio output to WebRTC
+            transport.input(),     # WebRTC audio input
+            vad,                  # Voice activity detection
+            stt,                  # Speech to text
+            self.n8n_processor,   # Your N8N AI Agent
+            tts,                  # Text to speech
+            transport.output(),   # WebRTC audio output
         ])
         
+        logger.info("🎯 Pipecat pipeline built successfully")
         return pipeline
     
     async def start_voice_session(self, room_url: str):
-        """Start a voice session with given room URL"""
+        """Start a Pipecat voice session"""
         try:
-            logger.info(f"Starting voice session for room: {room_url}")
+            if self.is_running:
+                logger.warning("⚠️ Voice session already running")
+                return
+                
+            self.is_running = True
+            logger.info(f"🚀 Starting Pipecat voice session: {room_url}")
             
-            # Configure transport (Daily.co for WebRTC)
+            # Configure Daily.co transport
             transport = DailyTransport(
                 room_url,
-                None,  # No token needed for temporary rooms
+                None,  # No token needed
                 "Voice Assistant",
                 DailyParams(
                     audio_in_enabled=True,
@@ -147,107 +196,194 @@ class VoiceBot:
                     transcription_enabled=False,
                     vad_enabled=True,
                     vad_analyzer=SileroVADAnalyzer(),
+                    camera_enabled=False
                 )
             )
+            logger.info("✅ Daily.co transport configured")
             
             # Create and run pipeline
             pipeline = await self.create_pipeline(transport)
-            task = PipelineTask(pipeline, PipelineParams())
+            task = PipelineTask(
+                pipeline,
+                PipelineParams(
+                    allow_interruptions=True,
+                    enable_metrics=True
+                )
+            )
             
-            # Store current task for cleanup
             self.current_task = task
             
-            # Run the pipeline
+            # Run the Pipecat pipeline
             runner = PipelineRunner()
+            logger.info("🎙️ Starting Pipecat pipeline runner...")
             await runner.run(task)
             
         except Exception as e:
-            logger.error(f"Voice session error: {e}")
+            logger.error(f"💥 Pipecat session failed: {e}")
             raise
+        finally:
+            self.is_running = False
+            logger.info("🔚 Pipecat session ended")
 
 # Global voice bot instance
 voice_bot = VoiceBot()
 
-# Web server for HTTP endpoints
 async def create_room(request):
-    """Create a new Daily.co room for voice chat"""
+    """Create Daily.co room for Pipecat voice session"""
     try:
-        logger.info("Creating new Daily.co room...")
+        logger.info("🏗️ Creating Daily.co room for Pipecat...")
         
-        # Create temporary room using Daily API
         async with httpx.AsyncClient(timeout=30.0) as client:
+            room_config = {
+                "properties": {
+                    "max_participants": 2,
+                    "enable_chat": False,
+                    "enable_screenshare": False,
+                    "enable_recording": False,
+                    "exp": int(asyncio.get_event_loop().time()) + 3600,  # 1 hour
+                    "audio_only": True
+                }
+            }
+            
             response = await client.post(
                 "https://api.daily.co/v1/rooms",
                 headers={
                     "Authorization": f"Bearer {DAILY_API_KEY}",
                     "Content-Type": "application/json"
                 },
-                json={
-                    "properties": {
-                        "max_participants": 2,
-                        "enable_chat": False,
-                        "enable_screenshare": False,
-                        "enable_recording": False,
-                        "exp": int(asyncio.get_event_loop().time()) + 3600,  # 1 hour expiry
-                    }
-                }
+                json=room_config
             )
             
             if response.status_code == 201:
                 room_data = response.json()
                 room_url = room_data["url"]
                 
-                logger.info(f"Room created successfully: {room_url}")
+                logger.info(f"✅ Room created: {room_url}")
                 
-                # Start voice session in background
+                # Start Pipecat session in background
                 asyncio.create_task(voice_bot.start_voice_session(room_url))
                 
                 return web.json_response({
                     "room_url": room_url,
                     "status": "created",
-                    "session_id": voice_bot.n8n_processor.session_id
+                    "session_id": voice_bot.n8n_processor.session_id,
+                    "framework": "pipecat"
                 })
             else:
-                logger.error(f"Failed to create room: {response.status_code} - {await response.text()}")
+                error_text = await response.text()
+                logger.error(f"❌ Failed to create room: {response.status_code} - {error_text}")
                 return web.json_response(
-                    {"error": "Failed to create room"}, 
+                    {"error": f"Room creation failed: {response.status_code}"}, 
                     status=500
                 )
                 
     except Exception as e:
-        logger.error(f"Room creation error: {e}")
-        return web.json_response(
-            {"error": str(e)}, 
-            status=500
-        )
+        logger.error(f"💥 Room creation error: {e}")
+        return web.json_response({"error": str(e)}, status=500)
 
 async def health_check(request):
-    """Health check endpoint for Railway"""
+    """Health check endpoint"""
+    environment_status = {
+        "deepgram": "configured" if DEEPGRAM_API_KEY else "missing",
+        "elevenlabs": "configured" if ELEVENLABS_API_KEY else "missing",
+        "n8n_webhook": "configured" if N8N_WEBHOOK_URL else "missing", 
+        "daily": "configured" if DAILY_API_KEY else "missing"
+    }
+    
     return web.json_response({
         "status": "healthy",
-        "service": "pipecat-voice-ai",
-        "timestamp": str(int(asyncio.get_event_loop().time())),
-        "environment": {
-            "deepgram": "configured" if DEEPGRAM_API_KEY else "missing",
-            "elevenlabs": "configured" if ELEVENLABS_API_KEY else "missing", 
-            "n8n_webhook": "configured" if N8N_WEBHOOK_URL else "missing",
-            "daily": "configured" if DAILY_API_KEY else "missing"
+        "service": "pipecat-voice-ai-n8n",
+        "framework": "pipecat",
+        "version": "0.0.40",
+        "timestamp": int(asyncio.get_event_loop().time()),
+        "environment": environment_status,
+        "features": {
+            "vad": "silero",
+            "stt": "deepgram_nova2", 
+            "llm": "n8n_claude_haiku",
+            "tts": "elevenlabs_turbo_v2"
+        },
+        "n8n_integration": {
+            "workflow": "AI Agent + Memory + Knowledge Base",
+            "session_id": voice_bot.n8n_processor.session_id
         }
     })
 
 async def voice_widget(request):
-    """Serve the voice widget HTML"""
+    """Serve the Pipecat voice widget"""
     html_content = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pipecat Voice AI</title>
+    <title>Pipecat Voice AI + N8N</title>
     <script src="https://unpkg.com/@daily-co/daily-js"></script>
     <style>
-        body { margin: 0; padding: 50px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-        .info { text-align: center; margin-bottom: 50px; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+        .header h1 {
+            font-size: 3rem;
+            margin-bottom: 10px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+        .framework-badge {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+            display: inline-block;
+            margin: 10px 0;
+            backdrop-filter: blur(10px);
+        }
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        .status-card {
+            background: rgba(255,255,255,0.95);
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            text-align: center;
+            backdrop-filter: blur(10px);
+            transition: transform 0.3s ease;
+        }
+        .status-card:hover {
+            transform: translateY(-5px);
+        }
+        .status-card h3 {
+            margin: 0 0 15px 0;
+            color: #2c3e50;
+            font-size: 1.1rem;
+        }
+        .status-indicator {
+            font-size: 2rem;
+            margin-bottom: 15px;
+        }
+        .status-text {
+            font-size: 14px;
+            color: #666;
+        }
         .voice-widget {
             position: fixed;
             bottom: 30px;
@@ -255,8 +391,8 @@ async def voice_widget(request):
             z-index: 10000;
         }
         .voice-button {
-            width: 70px;
-            height: 70px;
+            width: 80px;
+            height: 80px;
             border-radius: 50%;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             border: none;
@@ -264,85 +400,254 @@ async def voice_widget(request):
             display: flex;
             align-items: center;
             justify-content: center;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-            transition: all 0.3s ease;
+            box-shadow: 0 12px 40px rgba(102, 126, 234, 0.4);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             color: white;
-            font-size: 24px;
+            font-size: 32px;
+            position: relative;
         }
         .voice-button:hover {
-            transform: scale(1.05);
+            transform: scale(1.05) translateY(-2px);
+            box-shadow: 0 16px 50px rgba(102, 126, 234, 0.5);
+        }
+        .voice-button.connecting {
+            background: linear-gradient(135deg, #ffa726 0%, #ff9800 100%);
+            animation: connecting 1s ease-in-out infinite;
         }
         .voice-button.active {
-            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%);
-            animation: pulse 1.5s infinite;
+            background: linear-gradient(135deg, #4caf50 0%, #45a049 100%);
+            animation: listening 2s ease-in-out infinite;
         }
-        @keyframes pulse {
+        @keyframes connecting {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        @keyframes listening {
             0%, 100% { transform: scale(1); }
-            50% { transform: scale(1.1); }
+            50% { transform: scale(1.02); }
         }
         .status-display {
             position: absolute;
-            bottom: 85px;
+            bottom: 95px;
             right: 0;
-            background: rgba(0, 0, 0, 0.8);
+            background: rgba(0, 0, 0, 0.9);
             color: white;
-            padding: 12px 16px;
-            border-radius: 12px;
+            padding: 15px 20px;
+            border-radius: 15px;
             font-size: 14px;
             opacity: 0;
-            transition: opacity 0.3s ease;
-            min-width: 200px;
+            transition: all 0.3s ease;
+            min-width: 280px;
             text-align: center;
+            font-weight: 500;
+            backdrop-filter: blur(10px);
         }
         .status-display.visible {
             opacity: 1;
         }
+        .status-display.error {
+            background: rgba(244, 67, 54, 0.9);
+        }
+        .call-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 9999;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
+        .call-container {
+            width: 90%;
+            max-width: 600px;
+            height: 70%;
+            max-height: 400px;
+            background: #1a1a1a;
+            border-radius: 20px;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+        .call-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .call-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+        .close-button {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 5px 10px;
+            border-radius: 5px;
+            transition: background 0.2s ease;
+        }
+        .close-button:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        .call-frame {
+            width: 100%;
+            height: calc(100% - 60px);
+        }
+        .logs {
+            background: rgba(255,255,255,0.95);
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            backdrop-filter: blur(10px);
+        }
+        .logs h3 {
+            color: #2c3e50;
+            margin-bottom: 15px;
+        }
+        .log-container {
+            max-height: 300px;
+            overflow-y: auto;
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+        .log-entry {
+            margin: 5px 0;
+        }
+        .log-entry.info { color: #2196f3; }
+        .log-entry.success { color: #4caf50; }
+        .log-entry.error { color: #f44336; }
     </style>
 </head>
 <body>
-    <div class="info">
-        <h1>🎙️ Pipecat Voice AI Test</h1>
-        <p>Click the voice button in the bottom-right corner to start talking!</p>
-        <p><strong>Status:</strong> <span id="serviceStatus">Checking...</span></p>
+    <div class="container">
+        <div class="header">
+            <h1>🎙️ Pipecat Voice AI</h1>
+            <div class="framework-badge">Powered by Pipecat + N8N + Claude</div>
+            <p>Professional real-time voice conversation with AI memory & knowledge base</p>
+        </div>
+
+        <div class="status-grid">
+            <div class="status-card">
+                <div class="status-indicator" id="deepgramStatus">⏳</div>
+                <h3>Deepgram STT</h3>
+                <div class="status-text" id="deepgramText">Checking...</div>
+            </div>
+            <div class="status-card">
+                <div class="status-indicator" id="elevenlabsStatus">⏳</div>
+                <h3>ElevenLabs TTS</h3>
+                <div class="status-text" id="elevenlabsText">Checking...</div>
+            </div>
+            <div class="status-card">
+                <div class="status-indicator" id="n8nStatus">⏳</div>
+                <h3>N8N AI Agent</h3>
+                <div class="status-text" id="n8nText">Checking...</div>
+            </div>
+            <div class="status-card">
+                <div class="status-indicator" id="dailyStatus">⏳</div>
+                <h3>Daily.co WebRTC</h3>
+                <div class="status-text" id="dailyText">Checking...</div>
+            </div>
+        </div>
+
+        <div class="logs">
+            <h3>🔍 Pipecat Session Logs</h3>
+            <div class="log-container" id="logContainer"></div>
+        </div>
     </div>
 
     <div class="voice-widget">
         <button class="voice-button" id="voiceButton">🎤</button>
-        <div class="status-display" id="statusDisplay">Click to start voice chat</div>
+        <div class="status-display" id="statusDisplay">Ready for voice chat</div>
+    </div>
+
+    <div class="call-overlay" id="callOverlay">
+        <div class="call-container">
+            <div class="call-header">
+                <div class="call-title">🎙️ Pipecat + N8N Voice Session</div>
+                <button class="close-button" id="closeButton">×</button>
+            </div>
+            <div class="call-frame" id="callFrame"></div>
+        </div>
     </div>
 
     <script>
-        class PipecatVoiceWidget {
+        class PipecatN8NWidget {
             constructor() {
                 this.callFrame = null;
                 this.isActive = false;
                 this.button = document.getElementById('voiceButton');
                 this.status = document.getElementById('statusDisplay');
-                this.serviceStatus = document.getElementById('serviceStatus');
+                this.overlay = document.getElementById('callOverlay');
+                this.callContainer = document.getElementById('callFrame');
+                this.closeButton = document.getElementById('closeButton');
+                this.logContainer = document.getElementById('logContainer');
                 
                 this.button.addEventListener('click', () => this.toggleVoice());
+                this.closeButton.addEventListener('click', () => this.endCall());
+                
                 this.checkServiceHealth();
+            }
+            
+            log(message, type = 'info') {
+                const timestamp = new Date().toLocaleTimeString();
+                const logEntry = document.createElement('div');
+                logEntry.className = `log-entry ${type}`;
+                logEntry.textContent = `[${timestamp}] ${message}`;
+                this.logContainer.appendChild(logEntry);
+                this.logContainer.scrollTop = this.logContainer.scrollHeight;
+                console.log(`[Pipecat+N8N] ${message}`);
+            }
+            
+            updateServiceStatus(service, status, text = '') {
+                const indicator = document.getElementById(`${service}Status`);
+                const textEl = document.getElementById(`${service}Text`);
+                
+                if (status === 'configured') {
+                    indicator.textContent = '✅';
+                    textEl.textContent = 'Connected';
+                    textEl.style.color = '#4caf50';
+                } else {
+                    indicator.textContent = '❌';
+                    textEl.textContent = text || 'Missing Config';
+                    textEl.style.color = '#f44336';
+                }
             }
             
             async checkServiceHealth() {
                 try {
+                    this.log('Checking Pipecat + N8N service health...', 'info');
                     const response = await fetch('/health');
                     const health = await response.json();
+                    
+                    this.log(`Service: ${health.service} (${health.framework})`, 'success');
+                    this.log(`N8N Integration: ${health.n8n_integration.workflow}`, 'info');
+                    
+                    // Update status indicators
+                    Object.entries(health.environment).forEach(([service, status]) => {
+                        this.updateServiceStatus(service, status);
+                    });
                     
                     const missing = Object.entries(health.environment)
                         .filter(([key, value]) => value === 'missing')
                         .map(([key]) => key);
                     
                     if (missing.length === 0) {
-                        this.serviceStatus.textContent = '✅ All services configured';
-                        this.serviceStatus.style.color = 'green';
+                        this.log('✅ All services configured - ready for voice chat!', 'success');
                     } else {
-                        this.serviceStatus.textContent = `❌ Missing: ${missing.join(', ')}`;
-                        this.serviceStatus.style.color = 'red';
+                        this.log(`❌ Missing: ${missing.join(', ')}`, 'error');
                     }
                 } catch (error) {
-                    this.serviceStatus.textContent = '❌ Service unavailable';
-                    this.serviceStatus.style.color = 'red';
+                    this.log(`❌ Health check failed: ${error.message}`, 'error');
                 }
             }
             
@@ -350,37 +655,41 @@ async def voice_widget(request):
                 if (!this.isActive) {
                     await this.startVoiceChat();
                 } else {
-                    await this.stopVoiceChat();
+                    await this.endCall();
                 }
             }
             
             async startVoiceChat() {
                 try {
-                    this.updateStatus('Connecting...');
-                    console.log('Starting voice chat...');
+                    this.button.classList.add('connecting');
+                    this.updateStatus('Starting Pipecat session...', false);
+                    this.log('🚀 Starting Pipecat + N8N voice session...', 'info');
                     
                     // Create Daily.co room
-                    const response = await fetch('/create-room', {
-                        method: 'POST'
-                    });
-                    
+                    const response = await fetch('/create-room', { method: 'POST' });
                     const data = await response.json();
+                    
                     if (!response.ok) {
                         throw new Error(data.error || 'Failed to create room');
                     }
                     
-                    console.log('Room created:', data.room_url);
+                    this.log(`Room created: ${data.room_url}`, 'success');
+                    this.log(`Session ID: ${data.session_id}`, 'info');
                     
-                    // Join the room
-                    this.callFrame = DailyIframe.createFrame({
-                        showLeaveButton: false,
+                    // Show call overlay
+                    this.overlay.style.display = 'flex';
+                    
+                    // Join Daily.co room
+                    this.callFrame = DailyIframe.createFrame(this.callContainer, {
+                        showLeaveButton: true,
                         showFullscreenButton: false,
                         showLocalVideo: false,
-                        showParticipantsBar: false,
+                        showParticipantsBar: true,
                         theme: {
                             colors: {
                                 accent: '#667eea',
-                                accentText: '#FFFFFF'
+                                accentText: '#FFFFFF',
+                                background: '#1a1a1a'
                             }
                         }
                     });
@@ -390,59 +699,100 @@ async def voice_widget(request):
                         userName: 'User'
                     });
                     
-                    // Set up event listeners
-                    this.callFrame.on('participant-joined', (event) => {
-                        console.log('Participant joined:', event.participant.user_name);
-                        if (event.participant.user_name === 'Voice Assistant') {
-                            this.updateStatus('🎙️ Voice AI ready - speak naturally');
-                            this.button.classList.add('active');
-                            this.button.textContent = '🔴';
-                            this.isActive = true;
-                        }
-                    });
-                    
-                    this.callFrame.on('participant-left', () => {
-                        this.stopVoiceChat();
-                    });
-                    
-                    this.callFrame.on('error', (error) => {
-                        console.error('Call error:', error);
-                        this.updateStatus('Connection error - please try again');
-                        this.stopVoiceChat();
-                    });
+                    this.setupCallEventListeners();
                     
                 } catch (error) {
-                    console.error('Failed to start voice chat:', error);
-                    this.updateStatus('Failed to connect: ' + error.message);
+                    this.log(`Failed to start session: ${error.message}`, 'error');
+                    this.updateStatus(`Failed: ${error.message}`, true);
+                    this.button.classList.remove('connecting');
+                    this.overlay.style.display = 'none';
                 }
             }
             
-            async stopVoiceChat() {
-                if (this.callFrame) {
-                    await this.callFrame.leave();
-                    this.callFrame.destroy();
-                    this.callFrame = null;
-                }
+            setupCallEventListeners() {
+                this.callFrame.on('joined-meeting', () => {
+                    this.log('✅ Joined Daily.co meeting', 'success');
+                    this.button.classList.remove('connecting');
+                    this.button.classList.add('active');
+                    this.button.textContent = '🔴';
+                    this.updateStatus('🎙️ Pipecat AI ready! Speak naturally.');
+                    this.isActive = true;
+                });
                 
-                this.isActive = false;
-                this.button.classList.remove('active');
-                this.button.textContent = '🎤';
-                this.updateStatus('Click to start voice chat');
+                this.callFrame.on('participant-joined', (event) => {
+                    this.log(`Participant joined: ${event.participant.user_name}`, 'info');
+                    if (event.participant.user_name === 'Voice Assistant') {
+                        this.log('🤖 Pipecat AI connected with N8N!', 'success');
+                        this.updateStatus('🤖 AI + N8N ready!');
+                    }
+                });
+                
+                this.callFrame.on('track-started', (event) => {
+                    if (event.track.kind === 'audio' && event.participant.user_name === 'Voice Assistant') {
+                        this.log('🔊 AI is speaking...', 'info');
+                        this.updateStatus('🔊 AI responding...');
+                    }
+                });
+                
+                this.callFrame.on('track-stopped', (event) => {
+                    if (event.track.kind === 'audio' && event.participant.user_name === 'Voice Assistant') {
+                        this.log('🎙️ Ready for next input', 'info');
+                        this.updateStatus('🎙️ Listening...');
+                    }
+                });
+                
+                this.callFrame.on('error', (error) => {
+                    this.log(`Call error: ${error.errorMsg || error}`, 'error');
+                    this.updateStatus('Connection error', true);
+                    this.endCall();
+                });
+                
+                this.callFrame.on('left-meeting', () => {
+                    this.log('Left meeting', 'info');
+                    this.endCall();
+                });
             }
             
-            updateStatus(message) {
+            async endCall() {
+                try {
+                    this.log('🔚 Ending Pipecat session...', 'info');
+                    
+                    if (this.callFrame) {
+                        await this.callFrame.leave();
+                        this.callFrame.destroy();
+                        this.callFrame = null;
+                    }
+                    
+                    this.overlay.style.display = 'none';
+                    this.isActive = false;
+                    this.button.classList.remove('connecting', 'active');
+                    this.button.textContent = '🎤';
+                    this.updateStatus('Session ended');
+                    this.log('Session ended successfully', 'success');
+                    
+                } catch (error) {
+                    this.log(`Error ending session: ${error.message}`, 'error');
+                }
+            }
+            
+            updateStatus(message, isError = false) {
                 this.status.textContent = message;
+                this.status.classList.toggle('error', isError);
                 this.status.classList.add('visible');
                 
-                setTimeout(() => {
-                    this.status.classList.remove('visible');
-                }, 4000);
+                if (!this.isActive) {
+                    setTimeout(() => {
+                        this.status.classList.remove('visible');
+                    }, 4000);
+                }
             }
         }
         
         // Initialize widget
         document.addEventListener('DOMContentLoaded', () => {
-            new PipecatVoiceWidget();
+            const widget = new PipecatN8NWidget();
+            window.pipecatWidget = widget;
+            console.log('🎙️ Pipecat + N8N Voice Widget ready!');
         });
     </script>
 </body>
@@ -451,10 +801,10 @@ async def voice_widget(request):
     return web.Response(text=html_content, content_type='text/html')
 
 async def init_app():
-    """Initialize the web application"""
+    """Initialize web application"""
     app = web.Application()
     
-    # Configure CORS
+    # CORS configuration
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
             allow_credentials=True,
@@ -464,12 +814,12 @@ async def init_app():
         )
     })
     
-    # Add routes
+    # Routes
     app.router.add_get('/health', health_check)
     app.router.add_get('/', voice_widget)
     app.router.add_post('/create-room', create_room)
     
-    # Enable CORS on all routes
+    # Enable CORS
     for route in list(app.router.routes()):
         cors.add(route)
     
@@ -477,9 +827,9 @@ async def init_app():
 
 async def main():
     """Main application entry point"""
-    logger.info("Starting Pipecat Voice AI Service...")
+    logger.info("🎙️ Starting Bulletproof Pipecat + N8N Voice AI Service...")
     
-    # Validate environment variables
+    # Environment validation
     missing_vars = []
     if not DEEPGRAM_API_KEY:
         missing_vars.append("DEEPGRAM_API_KEY")
@@ -487,11 +837,12 @@ async def main():
         missing_vars.append("ELEVENLABS_API_KEY")
     if not N8N_WEBHOOK_URL:
         missing_vars.append("N8N_WEBHOOK_URL")
+    if not DAILY_API_KEY:
+        missing_vars.append("DAILY_API_KEY")
     
     if missing_vars:
-        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-        logger.error("Please set these variables in Railway dashboard")
-        sys.exit(1)
+        logger.error(f"❌ Missing environment variables: {', '.join(missing_vars)}")
+        logger.error("Set these in Railway dashboard before deployment")
     
     # Start web server
     app = await init_app()
@@ -501,15 +852,16 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
     
-    logger.info(f"🎙️ Pipecat Voice AI Service running on port {PORT}")
-    logger.info(f"🔗 Health check: http://localhost:{PORT}/health")
-    logger.info(f"🎤 Voice widget: http://localhost:{PORT}/")
+    logger.info(f"🚀 Pipecat Voice AI Service running on port {PORT}")
+    logger.info(f"🔗 Health: http://localhost:{PORT}/health")
+    logger.info(f"🎤 Widget: http://localhost:{PORT}/")
+    logger.info(f"⚡ Features: Silero VAD + Deepgram STT + N8N Claude + ElevenLabs TTS")
     
-    # Keep the server running
+    # Keep running
     try:
-        await asyncio.Future()  # Run forever
+        await asyncio.Future()
     except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        logger.info("🔚 Shutting down...")
     finally:
         await runner.cleanup()
 
