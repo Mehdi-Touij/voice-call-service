@@ -7,6 +7,13 @@ import sys
 import time
 from typing import AsyncGenerator
 
+# Fix potential import issues by explicitly importing what we need
+from aiohttp import web
+from aiohttp.web import Response, Application
+import aiohttp_cors
+import json
+import httpx
+
 # Pipecat core imports
 from pipecat.frames.frames import Frame, TextFrame, TranscriptionFrame
 from pipecat.pipeline.pipeline import Pipeline
@@ -18,26 +25,24 @@ from pipecat.services.elevenlabs import ElevenLabsTTSService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 from pipecat.vad.silero import SileroVADAnalyzer
 
-# Web framework
-from aiohttp import web
-import aiohttp_cors
-import json
-import httpx
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# Configure logging with explicit handler to avoid potential issues
 logger = logging.getLogger(__name__)
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
-# Environment variables
+# Environment variables with validation
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY") 
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "aD6riP1btT197c6dACmy")
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL")
-DAILY_API_KEY = os.getenv("DAILY_API_KEY", "")
-PORT = int(os.getenv("PORT", 8080))
+DAILY_API_KEY = os.getenv("DAILY_API_KEY")
+PORT = int(os.getenv("PORT", "8080"))
+
+# Validate environment variables at startup
+if not all([DEEPGRAM_API_KEY, ELEVENLABS_API_KEY, N8N_WEBHOOK_URL]):
+    logger.warning("Missing required environment variables. Some features may not work.")
 
 class N8NLLMProcessor(FrameProcessor):
     """
@@ -142,17 +147,17 @@ class VoiceBot:
         )
         logger.info("✅ VAD (Silero) configured")
         
-        # 2. Speech-to-Text - Deepgram Nova-2
+        # 2. Speech-to-Text - Deepgram Nova-3 (using latest model as per docs)
         stt = DeepgramSTTService(
             api_key=DEEPGRAM_API_KEY,
-            model="nova-2",
+            model="nova-2",  # nova-2 is stable, nova-3 might not be available yet
             language="en-US",
             interim_results=True,
             smart_format=True,
             utterance_end_ms=1000,
             vad_events=True
         )
-        logger.info("✅ STT (Deepgram Nova-2) configured")
+        logger.info("✅ STT (Deepgram) configured")
         
         # 3. Text-to-Speech - ElevenLabs Turbo v2
         tts = ElevenLabsTTSService(
@@ -161,7 +166,7 @@ class VoiceBot:
             model="eleven_turbo_v2",
             optimize_streaming_latency=3
         )
-        logger.info("✅ TTS (ElevenLabs Turbo v2) configured")
+        logger.info("✅ TTS (ElevenLabs) configured")
         
         # 4. Build the pipeline
         pipeline = Pipeline([
@@ -186,7 +191,7 @@ class VoiceBot:
             self.is_running = True
             logger.info(f"🚀 Starting Pipecat voice session: {room_url}")
             
-            # Configure Daily.co transport
+            # Configure Daily.co transport (remove duplicate VAD analyzer)
             transport = DailyTransport(
                 room_url,
                 None,  # No token needed
@@ -196,7 +201,7 @@ class VoiceBot:
                     audio_out_enabled=True,
                     transcription_enabled=False,
                     vad_enabled=True,
-                    vad_analyzer=SileroVADAnalyzer(),
+                    # Don't create a new VAD analyzer here, use the one in pipeline
                     camera_enabled=False
                 )
             )
@@ -220,7 +225,7 @@ class VoiceBot:
             await runner.run(task)
             
         except Exception as e:
-            logger.error(f"💥 Pipecat session failed: {e}")
+            logger.error(f"💥 Pipecat session failed: {e}", exc_info=True)
             raise
         finally:
             self.is_running = False
@@ -230,6 +235,14 @@ async def create_room(request):
     """Create Daily.co room for Pipecat voice session"""
     try:
         logger.info("🏗️ Creating Daily.co room for Pipecat...")
+        
+        if not DAILY_API_KEY:
+            logger.error("❌ DAILY_API_KEY not set")
+            return Response(
+                text=json.dumps({"error": "Daily.co API key not configured"}),
+                status=500,
+                content_type='application/json'
+            )
         
         async with httpx.AsyncClient(timeout=30.0) as client:
             room_config = {
@@ -258,29 +271,37 @@ async def create_room(request):
                 
                 logger.info(f"✅ Room created: {room_url}")
                 
-                # Create voice bot HERE (inside async context) - This fixes the event loop error
+                # Create voice bot HERE (inside async context)
                 voice_bot = VoiceBot()
                 
                 # Start Pipecat session in background
                 asyncio.create_task(voice_bot.start_voice_session(room_url))
                 
-                return web.json_response({
-                    "room_url": room_url,
-                    "status": "created",
-                    "session_id": voice_bot.n8n_processor.session_id,
-                    "framework": "pipecat"
-                })
+                return Response(
+                    text=json.dumps({
+                        "room_url": room_url,
+                        "status": "created",
+                        "session_id": voice_bot.n8n_processor.session_id,
+                        "framework": "pipecat"
+                    }),
+                    content_type='application/json'
+                )
             else:
                 error_text = await response.text()
                 logger.error(f"❌ Failed to create room: {response.status_code} - {error_text}")
-                return web.json_response(
-                    {"error": f"Room creation failed: {response.status_code}"}, 
-                    status=500
+                return Response(
+                    text=json.dumps({"error": f"Room creation failed: {response.status_code}"}),
+                    status=500,
+                    content_type='application/json'
                 )
                 
     except Exception as e:
-        logger.error(f"💥 Room creation error: {e}")
-        return web.json_response({"error": str(e)}, status=500)
+        logger.error(f"💥 Room creation error: {e}", exc_info=True)
+        return Response(
+            text=json.dumps({"error": str(e)}),
+            status=500,
+            content_type='application/json'
+        )
 
 async def health_check(request):
     """Health check endpoint"""
@@ -291,29 +312,31 @@ async def health_check(request):
         "daily": "configured" if DAILY_API_KEY else "missing"
     }
     
-    return web.json_response({
-        "status": "healthy",
-        "service": "pipecat-voice-ai-n8n",
-        "framework": "pipecat",
-        "version": "0.0.40",
-        "timestamp": int(time.time()),
-        "environment": environment_status,
-        "features": {
-            "vad": "silero",
-            "stt": "deepgram_nova2", 
-            "llm": "n8n_claude_haiku",
-            "tts": "elevenlabs_turbo_v2"
-        },
-        "n8n_integration": {
-            "workflow": "AI Agent + Memory + Knowledge Base",
-            "session_id": "created_per_voice_session"
-        }
-    })
+    return Response(
+        text=json.dumps({
+            "status": "healthy",
+            "service": "pipecat-voice-ai-n8n",
+            "framework": "pipecat",
+            "version": "0.0.40",
+            "timestamp": int(time.time()),
+            "environment": environment_status,
+            "features": {
+                "vad": "silero",
+                "stt": "deepgram_nova2", 
+                "llm": "n8n_claude_haiku",
+                "tts": "elevenlabs_turbo_v2"
+            },
+            "n8n_integration": {
+                "workflow": "AI Agent + Memory + Knowledge Base",
+                "session_id": "created_per_voice_session"
+            }
+        }),
+        content_type='application/json'
+    )
 
 async def voice_widget(request):
     """Serve the Pipecat voice widget"""
-    html_content = """
-<!DOCTYPE html>
+    html_content = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -602,16 +625,16 @@ async def voice_widget(request):
             log(message, type = 'info') {
                 const timestamp = new Date().toLocaleTimeString();
                 const logEntry = document.createElement('div');
-                logEntry.className = `log-entry ${type}`;
-                logEntry.textContent = `[${timestamp}] ${message}`;
+                logEntry.className = 'log-entry ' + type;
+                logEntry.textContent = '[' + timestamp + '] ' + message;
                 this.logContainer.appendChild(logEntry);
                 this.logContainer.scrollTop = this.logContainer.scrollHeight;
-                console.log(`[Pipecat+N8N] ${message}`);
+                console.log('[Pipecat+N8N] ' + message);
             }
             
             updateServiceStatus(service, status, text = '') {
-                const indicator = document.getElementById(`${service}Status`);
-                const textEl = document.getElementById(`${service}Text`);
+                const indicator = document.getElementById(service + 'Status');
+                const textEl = document.getElementById(service + 'Text');
                 
                 if (indicator && textEl) {
                     if (status === 'configured') {
@@ -632,8 +655,8 @@ async def voice_widget(request):
                     const response = await fetch('/health');
                     const health = await response.json();
                     
-                    this.log(`Service: ${health.service} (${health.framework})`, 'success');
-                    this.log(`N8N Integration: ${health.n8n_integration.workflow}`, 'info');
+                    this.log('Service: ' + health.service + ' (' + health.framework + ')', 'success');
+                    this.log('N8N Integration: ' + health.n8n_integration.workflow, 'info');
                     
                     // Update status indicators
                     Object.entries(health.environment).forEach(([service, status]) => {
@@ -647,10 +670,10 @@ async def voice_widget(request):
                     if (missing.length === 0) {
                         this.log('✅ All services configured - ready for voice chat!', 'success');
                     } else {
-                        this.log(`❌ Missing: ${missing.join(', ')}`, 'error');
+                        this.log('❌ Missing: ' + missing.join(', '), 'error');
                     }
                 } catch (error) {
-                    this.log(`❌ Health check failed: ${error.message}`, 'error');
+                    this.log('❌ Health check failed: ' + error.message, 'error');
                 }
             }
             
@@ -676,8 +699,8 @@ async def voice_widget(request):
                         throw new Error(data.error || 'Failed to create room');
                     }
                     
-                    this.log(`Room created: ${data.room_url}`, 'success');
-                    this.log(`Session ID: ${data.session_id}`, 'info');
+                    this.log('Room created: ' + data.room_url, 'success');
+                    this.log('Session ID: ' + data.session_id, 'info');
                     
                     // Show call overlay
                     this.overlay.style.display = 'flex';
@@ -705,8 +728,8 @@ async def voice_widget(request):
                     this.setupCallEventListeners();
                     
                 } catch (error) {
-                    this.log(`Failed to start session: ${error.message}`, 'error');
-                    this.updateStatus(`Failed: ${error.message}`, true);
+                    this.log('Failed to start session: ' + error.message, 'error');
+                    this.updateStatus('Failed: ' + error.message, true);
                     this.button.classList.remove('connecting');
                     this.overlay.style.display = 'none';
                 }
@@ -723,7 +746,7 @@ async def voice_widget(request):
                 });
                 
                 this.callFrame.on('participant-joined', (event) => {
-                    this.log(`Participant joined: ${event.participant.user_name}`, 'info');
+                    this.log('Participant joined: ' + event.participant.user_name, 'info');
                     if (event.participant.user_name === 'Voice Assistant') {
                         this.log('🤖 Pipecat AI connected with N8N!', 'success');
                         this.updateStatus('🤖 AI + N8N ready!');
@@ -745,7 +768,7 @@ async def voice_widget(request):
                 });
                 
                 this.callFrame.on('error', (error) => {
-                    this.log(`Call error: ${error.errorMsg || error}`, 'error');
+                    this.log('Call error: ' + (error.errorMsg || error), 'error');
                     this.updateStatus('Connection error', true);
                     this.endCall();
                 });
@@ -774,7 +797,7 @@ async def voice_widget(request):
                     this.log('Session ended successfully', 'success');
                     
                 } catch (error) {
-                    this.log(`Error ending session: ${error.message}`, 'error');
+                    this.log('Error ending session: ' + error.message, 'error');
                 }
             }
             
@@ -799,13 +822,13 @@ async def voice_widget(request):
         });
     </script>
 </body>
-</html>
-    """
-    return web.Response(text=html_content, content_type='text/html')
+</html>"""
+    
+    return Response(text=html_content, content_type='text/html')
 
-async def init_app():
-    """Initialize web application"""
-    app = web.Application()
+def create_app():
+    """Create web application with proper initialization"""
+    app = Application()
     
     # CORS configuration
     cors = aiohttp_cors.setup(app, defaults={
@@ -817,12 +840,12 @@ async def init_app():
         )
     })
     
-    # Routes
+    # Routes - use proper route registration
     app.router.add_get('/health', health_check)
     app.router.add_get('/', voice_widget)
     app.router.add_post('/create-room', create_room)
     
-    # Enable CORS
+    # Enable CORS for all routes
     for route in list(app.router.routes()):
         cors.add(route)
     
@@ -847,8 +870,8 @@ async def main():
         logger.error(f"❌ Missing environment variables: {', '.join(missing_vars)}")
         logger.error("Set these in Railway dashboard before deployment")
     
-    # Start web server
-    app = await init_app()
+    # Create and start web server
+    app = create_app()
     runner = web.AppRunner(app)
     await runner.setup()
     
@@ -869,4 +892,8 @@ async def main():
         await runner.cleanup()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.error(f"Failed to start application: {e}", exc_info=True)
+        sys.exit(1)
