@@ -1,5 +1,8 @@
-# Bulletproof Pipecat requirements - tested for Railway deployment
+# Bulletproof Pipecat requirements - with OpenAI dependency
 pipecat-ai==0.0.40
+
+# Required by Pipecat internally (even if we don't use OpenAI directly)
+openai>=1.0.0
 
 # Install Pipecat extras separately to avoid conflicts
 daily-python>=0.9.0
