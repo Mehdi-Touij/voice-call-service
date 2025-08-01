@@ -1,20 +1,16 @@
-# Core Pipecat with required extras
+# Pipecat AI with all required services
 pipecat-ai[daily,deepgram,elevenlabs,silero,openai]==0.0.40
 
-# Let pipecat-ai handle aiohttp version (requires >=3.10.3)
-# Only specify other explicit dependencies
+# OpenAI is required by Pipecat internally (even if we don't use it directly)
+openai>=1.0.0
+
+# Web framework dependencies
 aiohttp-cors==0.7.0
-httpx==0.25.2
+httpx>=0.24.1
 
-# Audio processing
-numpy==1.24.4
-soundfile==0.12.1
-webrtcvad==2.0.10
+# Audio processing dependencies that might not be included
+soundfile>=0.12.1
+webrtcvad>=2.0.10
 
-# Torch for Silero VAD (specific versions for compatibility)
-torch==2.1.2
-torchaudio==2.1.2
-
-# System dependencies
-setuptools==69.0.2
-wheel==0.42.0
+# Numpy with compatible version range
+numpy>=1.24.0,<2.0.0
