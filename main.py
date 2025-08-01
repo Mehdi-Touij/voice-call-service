@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from typing import AsyncGenerator
 
 # Pipecat core imports
@@ -47,7 +48,6 @@ class N8NLLMProcessor(FrameProcessor):
     def __init__(self, webhook_url: str):
         super().__init__()
         self.webhook_url = webhook_url
-        import time
         self.session_id = f"voice_{int(time.time())}"
         logger.info(f"N8N Processor initialized with session: {self.session_id}")
     
