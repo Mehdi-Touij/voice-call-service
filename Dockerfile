@@ -18,4 +18,4 @@ COPY .env.example .
 ENV PYTHONUNBUFFERED=1
 
 # Run the bot
-CMD ["python", "-m", "pipecat", "run"]
+CMD ["python", "bot.py"]
