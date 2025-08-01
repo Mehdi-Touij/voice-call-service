@@ -225,9 +225,6 @@ class VoiceBot:
             self.is_running = False
             logger.info("🔚 Pipecat session ended")
 
-# Global voice bot instance
-voice_bot = VoiceBot()
-
 async def create_room(request):
     """Create Daily.co room for Pipecat voice session"""
     try:
@@ -259,6 +256,9 @@ async def create_room(request):
                 room_url = room_data["url"]
                 
                 logger.info(f"✅ Room created: {room_url}")
+                
+                # Create voice bot HERE (inside async context) - This fixes the event loop error
+                voice_bot = VoiceBot()
                 
                 # Start Pipecat session in background
                 asyncio.create_task(voice_bot.start_voice_session(room_url))
@@ -305,7 +305,7 @@ async def health_check(request):
         },
         "n8n_integration": {
             "workflow": "AI Agent + Memory + Knowledge Base",
-            "session_id": voice_bot.n8n_processor.session_id
+            "session_id": "created_per_voice_session"
         }
     })
 
