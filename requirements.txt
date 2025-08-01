@@ -1,8 +1,8 @@
-# Pipecat Cloud SDK
+# Pipecat Cloud SDK with CLI
 pipecat-ai[cloud]==0.0.40
 
 # HTTP client for N8N webhook calls
 httpx>=0.24.1
 
-# Python environment
+# Environment variables
 python-dotenv>=1.0.0
