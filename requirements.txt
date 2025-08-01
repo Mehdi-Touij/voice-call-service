@@ -1,16 +1,8 @@
-# Pipecat AI with all required services
-pipecat-ai[daily,deepgram,elevenlabs,silero,openai]==0.0.40
+# Pipecat Cloud SDK
+pipecat-ai[cloud]==0.0.40
 
-# OpenAI is required by Pipecat internally (even if we don't use it directly)
-openai>=1.0.0
-
-# Web framework dependencies
-aiohttp-cors==0.7.0
+# HTTP client for N8N webhook calls
 httpx>=0.24.1
 
-# Audio processing dependencies that might not be included
-soundfile>=0.12.1
-webrtcvad>=2.0.10
-
-# Numpy with compatible version range
-numpy>=1.24.0,<2.0.0
+# Python environment
+python-dotenv>=1.0.0
