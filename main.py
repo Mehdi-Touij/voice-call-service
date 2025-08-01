@@ -36,7 +36,8 @@ DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY") 
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "aD6riP1btT197c6dACmy")
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL")
-DAILY_API_KEY = os.getenv("DAILY_API_KEY")
+# Daily domain from Pipecat Cloud (not an API key)
+DAILY_DOMAIN = os.getenv("DAILY_DOMAIN", "cloud-5bbf6640b3fd4778867e168bfbe3ca06")
 PORT = int(os.getenv("PORT", "8080"))
 
 # Validate environment variables at startup
@@ -148,10 +149,10 @@ class VoiceBot:
         )
         logger.info("✅ VAD (Silero) configured")
         
-        # 2. Speech-to-Text - Deepgram Nova-3 (using latest model as per docs)
+        # 2. Speech-to-Text - Deepgram Nova-2
         stt = DeepgramSTTService(
             api_key=DEEPGRAM_API_KEY,
-            model="nova-2",  # nova-2 is stable, nova-3 might not be available yet
+            model="nova-2",
             language="en-US",
             interim_results=True,
             smart_format=True,
@@ -192,7 +193,7 @@ class VoiceBot:
             self.is_running = True
             logger.info(f"🚀 Starting Pipecat voice session: {room_url}")
             
-            # Configure Daily.co transport (remove duplicate VAD analyzer)
+            # Configure Daily.co transport
             transport = DailyTransport(
                 room_url,
                 None,  # No token needed
@@ -202,7 +203,6 @@ class VoiceBot:
                     audio_out_enabled=True,
                     transcription_enabled=False,
                     vad_enabled=True,
-                    # Don't create a new VAD analyzer here, use the one in pipeline
                     camera_enabled=False
                 )
             )
@@ -233,9 +233,9 @@ class VoiceBot:
             logger.info("🔚 Pipecat session ended")
 
 async def create_room(request):
-    """Create Daily.co room for Pipecat voice session"""
+    """Create Daily room using Pipecat Cloud domain directly"""
     try:
-        logger.info("🏗️ Creating Daily.co room for Pipecat...")
+        logger.info("🏗️ Creating Daily room...")
         
         # Check if N8N webhook URL is set
         if not N8N_WEBHOOK_URL:
@@ -243,58 +243,28 @@ async def create_room(request):
             response_data = json.dumps({"error": "N8N webhook URL not configured"})
             return web.Response(text=response_data, status=500, content_type='application/json')
         
-        if not DAILY_API_KEY:
-            logger.error("❌ DAILY_API_KEY not set")
-            response_data = json.dumps({"error": "Daily.co API key not configured"})
-            return web.Response(text=response_data, status=500, content_type='application/json')
+        # Generate a unique room name
+        room_name = f"voice-{int(time.time())}-{os.urandom(4).hex()}"
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            room_config = {
-                "properties": {
-                    "max_participants": 2,
-                    "enable_chat": False,
-                    "enable_screenshare": False,
-                    "enable_recording": False,
-                    "exp": int(time.time()) + 3600,  # 1 hour
-                    "audio_only": True
-                }
-            }
-            
-            response = await client.post(
-                "https://api.daily.co/v1/rooms",
-                headers={
-                    "Authorization": f"Bearer {DAILY_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json=room_config
-            )
-            
-            if response.status_code == 201:
-                room_data = response.json()
-                room_url = room_data["url"]
-                
-                logger.info(f"✅ Room created: {room_url}")
-                
-                # Create voice bot HERE (inside async context)
-                voice_bot = VoiceBot()
-                
-                # Start Pipecat session in background
-                asyncio.create_task(voice_bot.start_voice_session(room_url))
-                
-                response_data = json.dumps({
-                    "room_url": room_url,
-                    "status": "created",
-                    "session_id": voice_bot.n8n_processor.session_id,
-                    "framework": "pipecat"
-                })
-                return web.Response(text=response_data, content_type='application/json')
-            else:
-                # With httpx, response.text is a property, not a method
-                error_text = response.text
-                logger.error(f"❌ Failed to create room: {response.status_code} - {error_text}")
-                response_data = json.dumps({"error": f"Room creation failed: {response.status_code}", "details": error_text})
-                return web.Response(text=response_data, status=500, content_type='application/json')
-                
+        # Use your Pipecat Cloud Daily domain
+        room_url = f"https://{DAILY_DOMAIN}.daily.co/{room_name}"
+        
+        logger.info(f"✅ Room created: {room_url}")
+        
+        # Create voice bot
+        voice_bot = VoiceBot()
+        
+        # Start Pipecat session in background
+        asyncio.create_task(voice_bot.start_voice_session(room_url))
+        
+        response_data = json.dumps({
+            "room_url": room_url,
+            "status": "created",
+            "session_id": voice_bot.n8n_processor.session_id,
+            "framework": "pipecat"
+        })
+        return web.Response(text=response_data, content_type='application/json')
+        
     except Exception as e:
         logger.error(f"💥 Room creation error: {e}", exc_info=True)
         response_data = json.dumps({"error": str(e)})
@@ -306,7 +276,7 @@ async def health_check(request):
         "deepgram": "configured" if DEEPGRAM_API_KEY else "missing",
         "elevenlabs": "configured" if ELEVENLABS_API_KEY else "missing",
         "n8n_webhook": "configured" if N8N_WEBHOOK_URL else "missing", 
-        "daily": "configured" if DAILY_API_KEY else "missing"
+        "daily": f"domain: {DAILY_DOMAIN}" if DAILY_DOMAIN else "missing"
     }
     
     response_data = json.dumps({
@@ -633,9 +603,9 @@ async def voice_widget(request):
                 const textEl = document.getElementById(service + 'Text');
                 
                 if (indicator && textEl) {
-                    if (status === 'configured') {
+                    if (status === 'configured' || status.includes('domain:')) {
                         indicator.textContent = '✅';
-                        textEl.textContent = 'Connected';
+                        textEl.textContent = text || 'Connected';
                         textEl.style.color = '#4caf50';
                     } else {
                         indicator.textContent = '❌';
@@ -656,7 +626,11 @@ async def voice_widget(request):
                     
                     // Update status indicators
                     Object.entries(health.environment).forEach(([service, status]) => {
-                        this.updateServiceStatus(service, status);
+                        if (service === 'daily' && status.includes('domain:')) {
+                            this.updateServiceStatus(service, status, 'Domain Ready');
+                        } else {
+                            this.updateServiceStatus(service, status);
+                        }
                     });
                     
                     const missing = Object.entries(health.environment)
@@ -859,12 +833,14 @@ async def main():
         missing_vars.append("ELEVENLABS_API_KEY")
     if not N8N_WEBHOOK_URL:
         missing_vars.append("N8N_WEBHOOK_URL")
-    if not DAILY_API_KEY:
-        missing_vars.append("DAILY_API_KEY")
     
     if missing_vars:
         logger.error(f"❌ Missing environment variables: {', '.join(missing_vars)}")
         logger.error("Set these in Railway dashboard before deployment")
+    else:
+        logger.info("✅ All required environment variables are set")
+    
+    logger.info(f"📍 Using Daily domain: {DAILY_DOMAIN}")
     
     # Create and start web server
     app = create_app()
