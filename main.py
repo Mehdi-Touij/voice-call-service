@@ -9,7 +9,6 @@ from typing import AsyncGenerator
 
 # Fix potential import issues by explicitly importing what we need
 from aiohttp import web
-from aiohttp.web import Response, Application
 import aiohttp_cors
 import json
 import httpx
@@ -131,6 +130,8 @@ class VoiceBot:
     """Complete Pipecat voice bot with N8N integration"""
     
     def __init__(self):
+        if not N8N_WEBHOOK_URL:
+            raise ValueError("N8N_WEBHOOK_URL is not configured")
         self.n8n_processor = N8NLLMProcessor(N8N_WEBHOOK_URL)
         self.current_task = None
         self.is_running = False
@@ -236,13 +237,16 @@ async def create_room(request):
     try:
         logger.info("🏗️ Creating Daily.co room for Pipecat...")
         
+        # Check if N8N webhook URL is set
+        if not N8N_WEBHOOK_URL:
+            logger.error("❌ N8N_WEBHOOK_URL not set")
+            response_data = json.dumps({"error": "N8N webhook URL not configured"})
+            return web.Response(text=response_data, status=500, content_type='application/json')
+        
         if not DAILY_API_KEY:
             logger.error("❌ DAILY_API_KEY not set")
-            return Response(
-                text=json.dumps({"error": "Daily.co API key not configured"}),
-                status=500,
-                content_type='application/json'
-            )
+            response_data = json.dumps({"error": "Daily.co API key not configured"})
+            return web.Response(text=response_data, status=500, content_type='application/json')
         
         async with httpx.AsyncClient(timeout=30.0) as client:
             room_config = {
@@ -277,31 +281,24 @@ async def create_room(request):
                 # Start Pipecat session in background
                 asyncio.create_task(voice_bot.start_voice_session(room_url))
                 
-                return Response(
-                    text=json.dumps({
-                        "room_url": room_url,
-                        "status": "created",
-                        "session_id": voice_bot.n8n_processor.session_id,
-                        "framework": "pipecat"
-                    }),
-                    content_type='application/json'
-                )
+                response_data = json.dumps({
+                    "room_url": room_url,
+                    "status": "created",
+                    "session_id": voice_bot.n8n_processor.session_id,
+                    "framework": "pipecat"
+                })
+                return web.Response(text=response_data, content_type='application/json')
             else:
-                error_text = await response.text()
+                # With httpx, response.text is a property, not a method
+                error_text = response.text
                 logger.error(f"❌ Failed to create room: {response.status_code} - {error_text}")
-                return Response(
-                    text=json.dumps({"error": f"Room creation failed: {response.status_code}"}),
-                    status=500,
-                    content_type='application/json'
-                )
+                response_data = json.dumps({"error": f"Room creation failed: {response.status_code}", "details": error_text})
+                return web.Response(text=response_data, status=500, content_type='application/json')
                 
     except Exception as e:
         logger.error(f"💥 Room creation error: {e}", exc_info=True)
-        return Response(
-            text=json.dumps({"error": str(e)}),
-            status=500,
-            content_type='application/json'
-        )
+        response_data = json.dumps({"error": str(e)})
+        return web.Response(text=response_data, status=500, content_type='application/json')
 
 async def health_check(request):
     """Health check endpoint"""
@@ -312,27 +309,26 @@ async def health_check(request):
         "daily": "configured" if DAILY_API_KEY else "missing"
     }
     
-    return Response(
-        text=json.dumps({
-            "status": "healthy",
-            "service": "pipecat-voice-ai-n8n",
-            "framework": "pipecat",
-            "version": "0.0.40",
-            "timestamp": int(time.time()),
-            "environment": environment_status,
-            "features": {
-                "vad": "silero",
-                "stt": "deepgram_nova2", 
-                "llm": "n8n_claude_haiku",
-                "tts": "elevenlabs_turbo_v2"
-            },
-            "n8n_integration": {
-                "workflow": "AI Agent + Memory + Knowledge Base",
-                "session_id": "created_per_voice_session"
-            }
-        }),
-        content_type='application/json'
-    )
+    response_data = json.dumps({
+        "status": "healthy",
+        "service": "pipecat-voice-ai-n8n",
+        "framework": "pipecat",
+        "version": "0.0.40",
+        "timestamp": int(time.time()),
+        "environment": environment_status,
+        "features": {
+            "vad": "silero",
+            "stt": "deepgram_nova2", 
+            "llm": "n8n_claude_haiku",
+            "tts": "elevenlabs_turbo_v2"
+        },
+        "n8n_integration": {
+            "workflow": "AI Agent + Memory + Knowledge Base",
+            "session_id": "created_per_voice_session"
+        }
+    })
+    
+    return web.Response(text=response_data, content_type='application/json')
 
 async def voice_widget(request):
     """Serve the Pipecat voice widget"""
@@ -824,11 +820,11 @@ async def voice_widget(request):
 </body>
 </html>"""
     
-    return Response(text=html_content, content_type='text/html')
+    return web.Response(text=html_content, content_type='text/html')
 
 def create_app():
     """Create web application with proper initialization"""
-    app = Application()
+    app = web.Application()
     
     # CORS configuration
     cors = aiohttp_cors.setup(app, defaults={
