@@ -308,7 +308,7 @@ async def voice_widget(request):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Pipecat Voice AI + N8N</title>
-    <script src="https://unpkg.com/@daily-co/daily-js"></script>
+    <script src="https://cdn.daily.co/daily-js/daily.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -582,6 +582,11 @@ async def voice_widget(request):
                 this.closeButton = document.getElementById('closeButton');
                 this.logContainer = document.getElementById('logContainer');
                 
+                // Verify all elements exist
+                if (!this.callContainer) {
+                    console.error('Call container element not found!');
+                }
+                
                 this.button.addEventListener('click', () => this.toggleVoice());
                 this.closeButton.addEventListener('click', () => this.endCall());
                 
@@ -657,6 +662,17 @@ async def voice_widget(request):
             
             async startVoiceChat() {
                 try {
+                    // Clean up any existing call frame first
+                    if (this.callFrame) {
+                        try {
+                            await this.callFrame.leave();
+                            this.callFrame.destroy();
+                            this.callFrame = null;
+                        } catch (e) {
+                            console.error('Error cleaning up existing frame:', e);
+                        }
+                    }
+                    
                     this.button.classList.add('connecting');
                     this.updateStatus('Starting Pipecat session...', false);
                     this.log('🚀 Starting Pipecat + N8N voice session...', 'info');
@@ -672,36 +688,87 @@ async def voice_widget(request):
                     this.log('Room created: ' + data.room_url, 'success');
                     this.log('Session ID: ' + data.session_id, 'info');
                     
-                    // Show call overlay
+                    // Log what's available
+                    console.log('Daily.co check - window.Daily:', typeof window.Daily);
+                    console.log('Daily.co check - window.DailyIframe:', typeof window.DailyIframe);
+                    console.log('Daily.co check - window.daily:', typeof window.daily);
+                    
+                    // Check if Daily is available (CDN version uses window.Daily)
+                    if (typeof window.Daily === 'undefined') {
+                        throw new Error('Daily.co library not loaded. Please refresh the page.');
+                    }
+                    
+                    // Show call overlay first
                     this.overlay.style.display = 'flex';
                     
-                    // Join Daily.co room
-                    this.callFrame = DailyIframe.createFrame(this.callContainer, {
-                        showLeaveButton: true,
-                        showFullscreenButton: false,
-                        showLocalVideo: false,
-                        showParticipantsBar: true,
-                        theme: {
-                            colors: {
-                                accent: '#667eea',
-                                accentText: '#FFFFFF',
-                                background: '#1a1a1a'
-                            }
-                        }
+                    // Small delay to ensure DOM is ready
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    
+                    // Ensure container exists
+                    if (!this.callContainer) {
+                        throw new Error('Call container element not found');
+                    }
+                    
+                    console.log('Call container:', this.callContainer);
+                    console.log('Container dimensions:', this.callContainer.offsetWidth, 'x', this.callContainer.offsetHeight);
+                    
+                    try {
+                        // Create Daily.co frame using the CDN API
+                        console.log('Creating Daily call frame...');
+                        this.callFrame = window.Daily.createFrame(this.callContainer, {
+                            iframeStyle: {
+                                width: '100%',
+                                height: '100%',
+                                border: '0'
+                            },
+                            showLeaveButton: true,
+                            showFullscreenButton: false
+                        });
+                        console.log('Daily frame created successfully:', this.callFrame);
+                    } catch (frameError) {
+                        console.error('Error creating Daily frame:', frameError);
+                        throw new Error('Failed to create video frame: ' + frameError.message);
+                    }
                     });
                     
-                    await this.callFrame.join({
-                        url: data.room_url,
-                        userName: 'User'
-                    });
-                    
+                    // Set up event listeners before joining
                     this.setupCallEventListeners();
                     
+                    // Now join the room with error handling
+                    try {
+                        console.log('Joining room:', data.room_url);
+                        await this.callFrame.join({
+                            url: data.room_url,
+                            userName: 'User'
+                        });
+                        console.log('Successfully joined room');
+                    } catch (joinError) {
+                        console.error('Error joining room:', joinError);
+                        throw new Error('Failed to join room: ' + joinError.message);
+                    }
+                    
                 } catch (error) {
+                    console.error('Voice chat error:', error);
                     this.log('Failed to start session: ' + error.message, 'error');
                     this.updateStatus('Failed: ' + error.message, true);
-                    this.button.classList.remove('connecting');
+                    this.button.classList.remove('connecting', 'active');
                     this.overlay.style.display = 'none';
+                    this.button.textContent = '🎤';
+                    
+                    // Clean up on error
+                    if (this.callFrame) {
+                        try {
+                            const state = this.callFrame.meetingState();
+                            if (state && state !== 'left' && state !== 'error') {
+                                this.callFrame.destroy();
+                            }
+                        } catch (e) {
+                            console.error('Error destroying frame:', e);
+                        }
+                        this.callFrame = null;
+                    }
+                    
+                    this.isActive = false;
                 }
             }
             
@@ -754,8 +821,19 @@ async def voice_widget(request):
                     this.log('🔚 Ending Pipecat session...', 'info');
                     
                     if (this.callFrame) {
-                        await this.callFrame.leave();
-                        this.callFrame.destroy();
+                        try {
+                            // Check if we're in a meeting before trying to leave
+                            const meetingState = this.callFrame.meetingState();
+                            console.log('Meeting state:', meetingState);
+                            
+                            if (meetingState === 'joined' || meetingState === 'joining') {
+                                await this.callFrame.leave();
+                            }
+                            
+                            await this.callFrame.destroy();
+                        } catch (e) {
+                            console.error('Error during cleanup:', e);
+                        }
                         this.callFrame = null;
                     }
                     
@@ -768,6 +846,12 @@ async def voice_widget(request):
                     
                 } catch (error) {
                     this.log('Error ending session: ' + error.message, 'error');
+                    // Force cleanup even on error
+                    this.callFrame = null;
+                    this.overlay.style.display = 'none';
+                    this.isActive = false;
+                    this.button.classList.remove('connecting', 'active');
+                    this.button.textContent = '🎤';
                 }
             }
             
@@ -784,11 +868,23 @@ async def voice_widget(request):
             }
         }
         
-        // Initialize widget
-        document.addEventListener('DOMContentLoaded', () => {
-            const widget = new PipecatN8NWidget();
-            window.pipecatWidget = widget;
-            console.log('🎙️ Pipecat + N8N Voice Widget ready!');
+        // Initialize widget when everything is loaded
+        window.addEventListener('load', () => {
+            console.log('Window loaded, checking for Daily.co...');
+            
+            const initWidget = () => {
+                if (typeof window.Daily !== 'undefined') {
+                    console.log('Daily.co loaded successfully');
+                    const widget = new PipecatN8NWidget();
+                    window.pipecatWidget = widget;
+                    console.log('🎙️ Pipecat + N8N Voice Widget ready!');
+                } else {
+                    console.log('Daily.co not yet loaded, waiting...');
+                    setTimeout(initWidget, 500);
+                }
+            };
+            
+            initWidget();
         });
     </script>
 </body>
