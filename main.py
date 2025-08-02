@@ -28,8 +28,11 @@ app.add_middleware(
 # Store active sessions
 active_sessions: Dict[str, VoiceBot] = {}
 
-# Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Cleanup task reference
+cleanup_task = None
+
+# Create static directory if it doesn't exist
+os.makedirs("static", exist_ok=True)
 
 @app.get("/")
 async def root():
@@ -88,24 +91,6 @@ async def session_status(session_id: str):
     else:
         return {"status": "inactive", "session_id": session_id}
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize services on startup"""
-    print("🚀 Voice Bot Service Starting...")
-    print(f"📡 N8N Webhook: {os.getenv('N8N_WEBHOOK_URL')}")
-    print(f"🎙️  Deepgram: {'✓' if os.getenv('DEEPGRAM_API_KEY') else '✗'}")
-    print(f"🔊 ElevenLabs: {'✓' if os.getenv('ELEVENLABS_API_KEY') else '✗'}")
-    print(f"📹 Daily: {'✓' if os.getenv('DAILY_API_KEY') else '✗'}")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    print("🛑 Shutting down Voice Bot Service...")
-    # End all active sessions
-    for session_id, bot in active_sessions.items():
-        await bot.stop()
-    active_sessions.clear()
-
 # Cleanup inactive sessions periodically
 async def cleanup_sessions():
     """Remove inactive sessions after timeout"""
@@ -122,8 +107,33 @@ async def cleanup_sessions():
             del active_sessions[session_id]
             print(f"Cleaned up inactive session: {session_id}")
 
-# Start cleanup task
-asyncio.create_task(cleanup_sessions())
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on startup"""
+    global cleanup_task
+    print("🚀 Voice Bot Service Starting...")
+    print(f"📡 N8N Webhook: {os.getenv('N8N_WEBHOOK_URL')}")
+    print(f"🎙️  Deepgram: {'✓' if os.getenv('DEEPGRAM_API_KEY') else '✗'}")
+    print(f"🔊 ElevenLabs: {'✓' if os.getenv('ELEVENLABS_API_KEY') else '✗'}")
+    print(f"📹 Daily: {'✓' if os.getenv('DAILY_API_KEY') else '✗'}")
+    
+    # Start cleanup task
+    cleanup_task = asyncio.create_task(cleanup_sessions())
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    global cleanup_task
+    print("🛑 Shutting down Voice Bot Service...")
+    
+    # Cancel cleanup task
+    if cleanup_task:
+        cleanup_task.cancel()
+    
+    # End all active sessions
+    for session_id, bot in active_sessions.items():
+        await bot.stop()
+    active_sessions.clear()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
