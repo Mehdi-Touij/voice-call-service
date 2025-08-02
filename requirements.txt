@@ -1,9 +1,10 @@
-# Core dependencies with pinned versions
-pipecat[daily,deepgram,elevenlabs]==0.0.40
+# Core dependencies with updated pipecat version
+pipecat[daily,deepgram,elevenlabs]==0.3.0
 fastapi==0.104.1
 uvicorn==0.24.0
 httpx==0.25.2
 python-dotenv==1.0.0
+loguru==0.7.2
 
 # Additional dependencies for production
 python-multipart==0.0.6  # For file uploads
