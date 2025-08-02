@@ -6,14 +6,16 @@ from typing import Optional
 import httpx
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineTask
-from pipecat.processors.aggregators.llm_response import LLMUserResponseAggregator
-from pipecat.processors.aggregators.llm_response import LLMAssistantResponseAggregator
+from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.processors.aggregators.llm_response import (
+    LLMAssistantResponseAggregator,
+    LLMUserResponseAggregator
+)
 from pipecat.services.deepgram import DeepgramSTTService
 from pipecat.services.elevenlabs import ElevenLabsTTSService
-from pipecat.transports.services.daily import DailyTransport, DailyParams
+from pipecat.transports.services.daily import DailyParams, DailyTransport
 from pipecat.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import EndFrame, LLMMessagesFrame
+from pipecat.frames.frames import Frame, TextFrame, EndFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from loguru import logger
 
@@ -27,15 +29,15 @@ class N8NProcessor(FrameProcessor):
         self.session_id = session_id
         self.client = httpx.AsyncClient(timeout=30.0)
     
-    async def process_frame(self, frame, direction: FrameDirection):
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames and send user messages to N8N"""
         await super().process_frame(frame, direction)
         
-        if isinstance(frame, LLMMessagesFrame):
-            # Extract user message
-            for msg in frame.messages:
-                if msg["role"] == "user":
-                    await self._send_to_n8n(msg["content"])
+        # Handle text frames from STT
+        if isinstance(frame, TextFrame):
+            # Check if this is user input (not assistant response)
+            if hasattr(frame, 'user_id') or direction == FrameDirection.UPSTREAM:
+                await self._send_to_n8n(frame.text)
     
     async def _send_to_n8n(self, message: str):
         """Send message to N8N webhook and get response"""
@@ -53,16 +55,12 @@ class N8NProcessor(FrameProcessor):
             data = response.json()
             ai_response = data.get("response", "I didn't understand that. Could you please repeat?")
             
-            # Push AI response as a new frame
-            await self.push_frame(LLMMessagesFrame([
-                {"role": "assistant", "content": ai_response}
-            ]))
+            # Push AI response as text frame
+            await self.push_frame(TextFrame(ai_response))
             
         except Exception as e:
             logger.error(f"N8N webhook error: {e}")
-            await self.push_frame(LLMMessagesFrame([
-                {"role": "assistant", "content": "I'm having trouble connecting to my brain. Please try again."}
-            ]))
+            await self.push_frame(TextFrame("I'm having trouble connecting to my brain. Please try again."))
     
     async def cleanup(self):
         """Cleanup HTTP client"""
@@ -76,14 +74,13 @@ class VoiceBot:
         self.session_id = session_id
         self.room_url: Optional[str] = None
         self.task: Optional[PipelineTask] = None
-        self.runner: Optional[PipelineRunner] = None
         self.transport: Optional[DailyTransport] = None
         self.start_time = time.time()
         self.last_activity = time.time()
         
         # Load configuration
         self.n8n_webhook_url = os.getenv("N8N_WEBHOOK_URL")
-        self.daily_api_key = os.getenv("DAILY_API_KEY")
+        self.daily_api_key = os.getenv("DAILY_API_KEY") 
         self.deepgram_api_key = os.getenv("DEEPGRAM_API_KEY")
         self.elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY")
         self.elevenlabs_voice_id = os.getenv("ELEVENLABS_VOICE_ID")
@@ -94,7 +91,9 @@ class VoiceBot:
             self.session_id,
             DailyParams(
                 api_key=self.daily_api_key,
-                transcription_enabled=True,
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                transcription_enabled=False,  # We'll use Deepgram
                 vad_enabled=True,
                 vad_analyzer=SileroVADAnalyzer()
             )
@@ -111,14 +110,15 @@ class VoiceBot:
             # Initialize STT service (Deepgram)
             stt = DeepgramSTTService(
                 api_key=self.deepgram_api_key,
-                params={
+                live_options={
                     "model": "nova-2-general",
                     "language": "en",
-                    "encoding": "linear16",
+                    "encoding": "linear16", 
                     "sample_rate": 16000,
                     "channels": 1,
                     "interim_results": True,
-                    "endpointing": 100,  # Faster end-of-speech detection
+                    "endpointing": 100,
+                    "smart_format": True,
                 }
             )
             
@@ -127,7 +127,11 @@ class VoiceBot:
                 api_key=self.elevenlabs_api_key,
                 voice_id=self.elevenlabs_voice_id,
                 params={
-                    "optimize_streaming_latency": 2,  # Lowest latency
+                    "stability": 0.5,
+                    "similarity_boost": 0.75,
+                    "style": 0.0,
+                    "use_speaker_boost": True,
+                    "optimize_streaming_latency": 2,
                     "output_format": "pcm_16000",
                 }
             )
@@ -139,25 +143,23 @@ class VoiceBot:
             pipeline = Pipeline([
                 self.transport.input(),    # Audio input from Daily
                 stt,                       # Speech to text
-                LLMUserResponseAggregator(),  # Aggregate user speech
                 n8n_processor,             # Process with N8N
                 tts,                       # Text to speech
                 self.transport.output()    # Audio output to Daily
             ])
             
-            # Set up runner
-            self.runner = PipelineRunner()
+            # Create runner
+            runner = PipelineRunner()
             
             # Run pipeline
-            self.task = self.runner.run(pipeline)
+            self.task = runner.run(pipeline)
             
             # Join Daily room
             await self.transport.join()
             
             # Send welcome message
-            await n8n_processor.push_frame(LLMMessagesFrame([
-                {"role": "assistant", "content": "Hello! I'm your N8N voice assistant. How can I help you today?"}
-            ]))
+            welcome_frame = TextFrame("Hello! I'm your N8N voice assistant. How can I help you today?")
+            await n8n_processor.process_frame(welcome_frame, FrameDirection.DOWNSTREAM)
             
             logger.info(f"Voice bot started for session {self.session_id}")
             
@@ -170,6 +172,7 @@ class VoiceBot:
         try:
             if self.task:
                 self.task.cancel()
+                await asyncio.gather(self.task, return_exceptions=True)
             
             if self.transport:
                 await self.transport.leave()
